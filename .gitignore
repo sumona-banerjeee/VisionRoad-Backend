@@ -1,0 +1,22 @@
+# Virtual environments
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Model files
+*.pt
+*.onnx
+*.engine
+
+# Uploads & generated outputs
+uploads/
+results/
+
+# Lock files (optional)
+uv.lock

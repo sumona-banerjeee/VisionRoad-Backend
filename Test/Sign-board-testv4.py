@@ -5,11 +5,11 @@ import numpy as np
 
 # 1. Load pre-trained model
 model = YOLO(
-    r"D:\Pothole_Full_Backend\pothole-detection-backend\ml_models\bestsv2.pt"
+    r"D:\VisionRoad-Backend\models\best-board-v2.pt"
 )
 
 # 2. Open the video file
-video_path = r"D:\Pothole_Full_Backend\pothole-detection-backend\Test\Dash_Cam_Highway_Curve_Video.mp4"
+video_path = r"D:\VisionRoad-Backend\Test\video\traffic sign test video.mp4"
 cap = cv2.VideoCapture(video_path)
 
 # Get video properties
@@ -18,7 +18,7 @@ width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
 # Initialize video writer to save output
-output_path = r"D:\Pothole_Full_Backend\pothole-detection-backend\Test\simplensv2.mp4"
+output_path = r"D:\VisionRoad-Backend\Test\output\outputvideo.mp4"
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 video_writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 

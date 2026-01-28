@@ -2,6 +2,11 @@
 .venv/
 venv/
 
+#outputs
+Test/output
+
+
+
 # Environment variables
 .env
 

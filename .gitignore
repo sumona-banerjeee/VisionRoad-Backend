@@ -10,7 +10,6 @@ __pycache__/
 *.pyc
 
 # Model files
-*.pt
 *.onnx
 *.engine
 

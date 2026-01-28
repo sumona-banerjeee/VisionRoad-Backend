@@ -5,10 +5,10 @@ from datetime import datetime
 from ultralytics import YOLO
 
 # ===================== CONFIG =====================
-MODEL_PATH = r"D:\VisionRoad-Backend\models\best-board-v2.pt"
-VIDEO_PATH = r"D:\VisionRoad-Backend\Test\video\Dash_Cam_Highway_Curve_Video.mp4"
-OUTPUT_VIDEO_PATH = r"D:\VisionRoad-Backend\Test\output\outputvideo.mp4"
-OUTPUT_JSON_PATH = r"D:\VisionRoad-Backend\Test\output\signboard.json"
+MODEL_PATH = r"models\best-board-v2.pt"
+VIDEO_PATH = r"Test\video\road-sign-ml.mp4"
+OUTPUT_VIDEO_PATH = r"Test\output\outputvideo.mp4"
+OUTPUT_JSON_PATH = r"Test\output\signboard.json"
 
 CONF_THRESHOLD = 0.6
 

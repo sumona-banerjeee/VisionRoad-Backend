@@ -79,6 +79,8 @@ class VideoProcessor:
         else:
             return {"roi_ratio": 0.75, "conf": 0.22}
 
+
+    # === Main detection function for a single frame ===
     def detect_frame(
         self, frame, frame_id, results_log, tracker, confirmed, current_time, speed
     ):

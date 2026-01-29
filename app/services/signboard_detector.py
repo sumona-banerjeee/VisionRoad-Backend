@@ -21,7 +21,7 @@ CONFIDENCE_THRESHOLD = 0.6
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 MODEL_PATH = "models/best-board-v2.pt"
 
-# ROI Configuration (from testv5.py)
+# ROI Configuration 
 # Top 10% to 70% of frame height
 ROI_TOP_RATIO = 0.10
 ROI_BOTTOM_RATIO = 0.70
@@ -77,6 +77,8 @@ class SignBoardDetector:
         )
         return {"lat": nearest_point.get("lat"), "lng": nearest_point.get("lng")}
 
+
+    # === Main detection function for a single frame ===
     def detect_frame(
         self, frame, frame_id, results_log, tracker, confirmed, current_time, fps
     ):

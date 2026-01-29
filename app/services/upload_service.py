@@ -28,7 +28,11 @@ class UploadService:
         self.signboard_processor = SignBoardDetector()
 
     async def upload_video(
-        self, file: UploadFile, detection_type: DetectionType, speed_kmh: int = 30
+        self,
+        file: UploadFile,
+        json_file: UploadFile,
+        detection_type: DetectionType,
+        speed_kmh: int = 30,
     ):
         """Upload video and start background processing"""
 
@@ -37,19 +41,30 @@ class UploadService:
             raise HTTPException(
                 status_code=400, detail="Invalid file type. Please upload a video file."
             )
+        if not json_file.filename.lower().endswith((".json")):
+            raise HTTPException(
+                status_code=400, detail="Invalid file type. Please upload a json file."
+            )
 
         # Generate unique video ID
         video_id = str(uuid.uuid4())
 
-        # Save uploaded file
+        # Save uploaded video file
         file_extension = Path(file.filename).suffix
         video_path = UPLOAD_DIR / f"{video_id}{file_extension}"
+        # save json file
+        json_file_extension = Path(json_file.filename).suffix
+        json_path = UPLOAD_DIR / f"{video_id}{json_file_extension}"
 
         try:
             with open(video_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
+            with open(json_path, "wb") as buffer:
+                shutil.copyfileobj(json_file.file, buffer)
+
             logger.info(f"Video uploaded: {video_id} - {file.filename}")
+            logger.info(f"JSON file uploaded: {video_id} - {json_file.filename}")
 
         except Exception as e:
             logger.error(f"Error uploading file: {str(e)}")
@@ -74,7 +89,12 @@ class UploadService:
 
         # Start background processing
         asyncio.create_task(
-            processor.process_video(video_id, str(video_path), speed_kmh)
+            processor.process_video(
+                video_id=video_id,
+                video_path=str(video_path),
+                json_path=str(json_path),
+                speed_kmh=speed_kmh,
+            )
         )
 
         # Give a brief moment for WebSocket to potentially connect

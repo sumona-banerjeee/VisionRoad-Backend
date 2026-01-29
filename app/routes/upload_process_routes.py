@@ -23,12 +23,16 @@ video_processor = VideoProcessor()
 @router.post("/upload")
 async def upload_video(
     file: UploadFile = File(...),
+    json_file: UploadFile = File(...),
     detection_type: DetectionType = Form(DetectionType.POTHOLE_DETECTION),
     speed_kmh: int = Form(30),
 ):
     """Upload video and start background processing"""
     return await upload_service.upload_video(
-        file=file, detection_type=detection_type, speed_kmh=speed_kmh
+        file=file,
+        json_file=json_file,
+        detection_type=detection_type,
+        speed_kmh=speed_kmh,
     )
 
 

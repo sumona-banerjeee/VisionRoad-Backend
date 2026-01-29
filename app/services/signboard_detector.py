@@ -65,6 +65,18 @@ class SignBoardDetector:
         except:
             pass
 
+    @staticmethod
+    def find_nearest_gps(detection_time: float, gps_points: list) -> dict:
+        """Find the nearest GPS coordinates for a given timestamp"""
+        if not gps_points:
+            return {"lat": None, "lng": None}
+
+        # Find the GPS point with the closest timestamp
+        nearest_point = min(
+            gps_points, key=lambda p: abs(p.get("timestamp", 0) - detection_time)
+        )
+        return {"lat": nearest_point.get("lat"), "lng": nearest_point.get("lng")}
+
     def detect_frame(
         self, frame, frame_id, results_log, tracker, confirmed, current_time, fps
     ):
@@ -153,7 +165,9 @@ class SignBoardDetector:
 
         return len(detections)
 
-    def _process_video_blocking(self, video_id: str, video_path: str, speed: int, loop):
+    def _process_video_blocking(
+        self, video_id: str, video_path: str, json_path: str, speed: int, loop
+    ):
         """Process video in blocking thread"""
         try:
             asyncio.run_coroutine_threadsafe(
@@ -162,6 +176,19 @@ class SignBoardDetector:
                 ),
                 loop,
             )
+
+            # Load GPS data from JSON file
+            gps_points = []
+            if json_path and Path(json_path).exists():
+                try:
+                    with open(json_path, "r") as f:
+                        gps_data = json.load(f)
+                        gps_points = gps_data.get("gpsPoints", [])
+                        logger.info(
+                            f"Loaded {len(gps_points)} GPS points from {json_path}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to load GPS data: {e}")
 
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
@@ -223,19 +250,30 @@ class SignBoardDetector:
             cap.release()
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-            # Build results
+            # Build results with GPS coordinates
+            signboard_list = []
+            for info in confirmed.values():
+                signboard_data = {
+                    "signboard_id": info["signboard_id"],
+                    "type": info["type"],
+                    "first_detected_frame": info["first_detected_frame"],
+                    "first_detected_time": info["first_detected_time"],
+                    "confidence": info["confidence"],
+                }
+
+                # Add GPS coordinates if available
+                if gps_points:
+                    gps_coords = self.find_nearest_gps(
+                        info["first_detected_time"], gps_points
+                    )
+                    signboard_data["lat"] = gps_coords["lat"]
+                    signboard_data["lng"] = gps_coords["lng"]
+
+                signboard_list.append(signboard_data)
+
+            # Sort by first detected frame
             signboard_list = sorted(
-                [
-                    {
-                        "signboard_id": info["signboard_id"],
-                        "type": info["type"],
-                        "first_detected_frame": info["first_detected_frame"],
-                        "first_detected_time": info["first_detected_time"],
-                        "confidence": info["confidence"],
-                    }
-                    for info in confirmed.values()
-                ],
-                key=lambda x: x["first_detected_frame"],
+                signboard_list, key=lambda x: x["first_detected_frame"]
             )
 
             frames_with_detections = len(results_log["frames"])
@@ -317,7 +355,9 @@ class SignBoardDetector:
             )
             raise
 
-    async def process_video(self, video_id: str, video_path: str, speed_kmh: int):
+    async def process_video(
+        self, video_id: str, video_path: str, json_path: str, speed_kmh: int
+    ):
         """Async video processing"""
         processing_status[video_id] = {"status": "processing", "progress": 0}
         loop = asyncio.get_event_loop()
@@ -326,6 +366,7 @@ class SignBoardDetector:
             self._process_video_blocking,
             video_id,
             video_path,
+            json_path,
             speed_kmh,
             loop,
         )

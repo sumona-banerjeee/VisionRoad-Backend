@@ -2,6 +2,7 @@ from fastapi import (
     APIRouter,
     UploadFile,
     File,
+    Form,
     WebSocket,
     WebSocketDisconnect,
     HTTPException,
@@ -22,8 +23,8 @@ video_processor = VideoProcessor()
 @router.post("/upload")
 async def upload_video(
     file: UploadFile = File(...),
-    detection_type: DetectionType = DetectionType.POTHOLE_DETECTION,
-    speed_kmh: int = 30,
+    detection_type: DetectionType = Form(DetectionType.POTHOLE_DETECTION),
+    speed_kmh: int = Form(30),
 ):
     """Upload video and start background processing"""
     return await upload_service.upload_video(

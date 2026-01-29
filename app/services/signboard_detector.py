@@ -82,12 +82,12 @@ class SignBoardDetector:
         try:
             results = self.model.track(
                 frame,
+                persist=True,
                 conf=CONFIDENCE_THRESHOLD,
                 # tracker=TRACKER,
-                persist=True,
-                verbose=False,
-                device=DEVICE,
-                imgsz=640,
+                # verbose=False,
+                # device=DEVICE,
+                # imgsz=640,
             )
 
             for r in results:

@@ -6,7 +6,7 @@ from ultralytics import YOLO
 
 # ===================== CONFIG =====================
 MODEL_PATH = r"models\best-board-v2.pt"
-VIDEO_PATH = r"Test\video\road-sign-ml.mp4"
+VIDEO_PATH = r"Test\video\Dash_Cam_Highway_Curve_Video.mp4"
 OUTPUT_VIDEO_PATH = r"Test\output\outputvideo.mp4"
 OUTPUT_JSON_PATH = r"Test\output\signboard.json"
 

@@ -98,9 +98,9 @@ class SignBoardDetector:
                 frame,
                 persist=True,
                 conf=CONFIDENCE_THRESHOLD,
-                # tracker=TRACKER,
+                # tracker=TRACKER, # affect detection
                 # verbose=False,
-                # device=DEVICE,
+                device=DEVICE,    # use GPU if available
                 # imgsz=640,
             )
 

@@ -12,6 +12,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.ws.websocket_manager import manager
 from app.core.storage import processing_status, detection_results, RESULTS_DIR
+from app.db.database import SessionLocal
+from app.db import crud
+from app.services.location_mapper import find_location_by_gps
+from app.models.processing import ProcessingStatusEnum
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +25,7 @@ CONFIDENCE_THRESHOLD = 0.6
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 MODEL_PATH = "models/best-board-v2.pt"
 
-# ROI Configuration 
+# ROI Configuration
 # Top 10% to 70% of frame height
 ROI_TOP_RATIO = 0.10
 ROI_BOTTOM_RATIO = 0.70
@@ -77,7 +81,6 @@ class SignBoardDetector:
         )
         return {"lat": nearest_point.get("lat"), "lng": nearest_point.get("lng")}
 
-
     # === Main detection function for a single frame ===
     def detect_frame(
         self, frame, frame_id, results_log, tracker, confirmed, current_time, fps
@@ -100,7 +103,7 @@ class SignBoardDetector:
                 conf=CONFIDENCE_THRESHOLD,
                 # tracker=TRACKER, # affect detection
                 # verbose=False,
-                device=DEVICE,    # use GPU if available
+                device=DEVICE,  # use GPU if available
                 # imgsz=640,
             )
 
@@ -140,6 +143,8 @@ class SignBoardDetector:
                             "first_detected_frame": frame_id,
                             "first_detected_time": round(current_time, 2),
                             "confidence": round(float(conf), 3),
+                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                            "center": {"x": cx, "y": cy},
                         }
 
                     # Calculate area
@@ -261,6 +266,7 @@ class SignBoardDetector:
                     "first_detected_frame": info["first_detected_frame"],
                     "first_detected_time": info["first_detected_time"],
                     "confidence": info["confidence"],
+                    "bbox": info.get("bbox", {}),
                 }
 
                 # Add GPS coordinates if available
@@ -313,6 +319,66 @@ class SignBoardDetector:
 
             with open(RESULTS_DIR / f"{video_id}.json", "w") as f:
                 json.dump(results, f, indent=2)
+
+            # === Save detections to database ===
+            try:
+                db = SessionLocal()
+                saved_count = 0
+
+                for signboard in signboard_list:
+                    lat = signboard.get("lat")
+                    lng = signboard.get("lng")
+
+                    # Map GPS to location hierarchy
+                    project_id = None
+                    package_id = None
+                    location_id = None
+
+                    if lat and lng:
+                        location = find_location_by_gps(db, lat, lng)
+                        if location:
+                            location_id = location.id
+                            package_id = location.package_id
+                            # Get project_id from package
+                            if location.package:
+                                project_id = location.package.project_id
+
+                    # Save detection to database
+                    crud.create_detection(
+                        db=db,
+                        video_id=video_id,
+                        frame_number=signboard["first_detected_frame"],
+                        timestamp_ms=int(signboard["first_detected_time"] * 1000),
+                        confidence=signboard["confidence"],
+                        detection_type="signboard",
+                        class_name=signboard["type"],
+                        bounding_box=signboard.get("bbox", {}),
+                        latitude=lat,
+                        longitude=lng,
+                        project_id=project_id,
+                        package_id=package_id,
+                        location_id=location_id,
+                    )
+                    saved_count += 1
+
+                # Update processing status in database
+                crud.update_processing_status(
+                    db=db,
+                    video_id=video_id,
+                    status=ProcessingStatusEnum.COMPLETED,
+                    progress=100,
+                    result_summary=results["summary"],
+                )
+
+                db.commit()
+                logger.info(
+                    f"Saved {saved_count} signboard detections to database for {video_id}"
+                )
+
+            except Exception as db_error:
+                logger.error(f"Database save error: {db_error}")
+            finally:
+                db.close()
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
 

@@ -1,11 +1,14 @@
 from pathlib import Path
-from fastapi import UploadFile, HTTPException
+from fastapi import UploadFile, HTTPException, Depends
 import shutil
 import uuid
 import asyncio
 import logging
 from enum import Enum
-
+from sqlalchemy.orm import Session
+from app.db.database import get_db
+from app.db import crud
+from app.models.processing import ProcessingStatusEnum
 from app.services.video_processor import VideoProcessor
 from app.services.signboard_detector import SignBoardDetector
 from app.core.storage import processing_status
@@ -33,6 +36,7 @@ class UploadService:
         json_file: UploadFile,
         detection_type: DetectionType,
         speed_kmh: int = 30,
+        db: Session = Depends(get_db),
     ):
         """Upload video and start background processing"""
 
@@ -65,6 +69,22 @@ class UploadService:
 
             logger.info(f"Video uploaded: {video_id} - {file.filename}")
             logger.info(f"JSON file uploaded: {video_id} - {json_file.filename}")
+
+            # Create video record in database
+            video = crud.create_video(
+                db=db,
+                video_id=video_id,
+                filename=file.filename,
+                original_path=str(video_path),
+                json_file_path=str(json_path),
+                detection_type=detection_type,
+                speed_kmh=speed_kmh,
+            )
+
+            # Create initial processing status
+            db_processing_status = crud.create_processing_status(
+                db=db, video_id=video_id, status=ProcessingStatusEnum.PENDING
+            )
 
         except Exception as e:
             logger.error(f"Error uploading file: {str(e)}")

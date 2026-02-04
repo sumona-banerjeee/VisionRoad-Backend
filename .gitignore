@@ -1,26 +1,107 @@
-# Virtual environments
+# ====================
+# Virtual Environments
+# ====================
 .venv/
 venv/
+env/
 
-#outputs
-Test/output
-
-
-
-# Environment variables
-.env
-
-# Python cache
+# ====================
+# Python Cache
+# ====================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
 
-# Model files
+# ====================
+# Environment Variables
+# ====================
+.env
+.env.local
+.env.*.local
+
+# ====================
+# Database Files
+# ====================
+*.db
+*.sqlite
+*.sqlite3
+visionroad.db
+
+# ====================
+# Model Files (large binary files)
+# ====================
+# Note: .pt files are tracked to share trained models with collaborators
+# models/*.pt
+models/*.onnx
+models/*.engine
+models/*.weights
+# *.pt
 *.onnx
 *.engine
 
-# Uploads & generated outputs
+# ====================
+# Uploads & Generated Outputs
+# ====================
 uploads/
 results/
+Test/output/
 
-# Lock files (optional)
+# ====================
+# Alembic Migration Versions
+# ====================
+# Keep the versions folder but ignore auto-generated migrations during dev
+# alembic/versions/*.py
+# Uncomment above if you want to ignore migration files
+
+# ====================
+# IDE & Editor
+# ====================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ====================
+# Logs
+# ====================
+*.log
+logs/
+
+# ====================
+# Build & Distribution
+# ====================
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ====================
+# Testing
+# ====================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ====================
+# Package Manager
+# ====================
 uv.lock
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ====================
+# Jupyter Notebooks
+# ====================
+.ipynb_checkpoints/
+
+# ====================
+# Temporary Files
+# ====================
+*.tmp
+*.temp
+*.bak

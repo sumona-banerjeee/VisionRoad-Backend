@@ -6,12 +6,15 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
     HTTPException,
+    Depends
 )
+from sqlalchemy.orm import Session
 import asyncio
 from app.services.upload_service import UploadService, DetectionType
 from app.services.video_processor import VideoProcessor
 from app.ws.websocket_manager import manager
 from app.core.storage import processing_status, detection_results
+from app.db.database import get_db
 
 
 router = APIRouter()
@@ -26,6 +29,7 @@ async def upload_video(
     json_file: UploadFile = File(...),
     detection_type: DetectionType = Form(DetectionType.POTHOLE_DETECTION),
     speed_kmh: int = Form(30),
+    db: Session = Depends(get_db)
 ):
     """Upload video and start background processing"""
     return await upload_service.upload_video(
@@ -33,6 +37,7 @@ async def upload_video(
         json_file=json_file,
         detection_type=detection_type,
         speed_kmh=speed_kmh,
+        db=db
     )
 
 

@@ -12,6 +12,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.ws.websocket_manager import manager
 from app.core.storage import processing_status, detection_results, RESULTS_DIR
+from app.db.database import SessionLocal
+from app.db import crud
+from app.services.location_mapper import find_location_by_gps
+from app.models.processing import ProcessingStatusEnum
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +83,6 @@ class VideoProcessor:
         else:
             return {"roi_ratio": 0.75, "conf": 0.22}
 
-
     # === Main detection function for a single frame ===
     def detect_frame(
         self, frame, frame_id, results_log, tracker, confirmed, current_time, speed
@@ -143,6 +146,7 @@ class VideoProcessor:
                             "frame": frame_id,
                             "time": current_time,
                             "conf": conf,
+                            "bbox": {"x1": x1, "y1": y1_full, "x2": x2, "y2": y2_full},
                         }
                         new_count = 1
 
@@ -276,6 +280,7 @@ class VideoProcessor:
                     "first_detected_frame": info["frame"],
                     "first_detected_time": round(info["time"], 2),
                     "confidence": round(float(info["conf"]), 3),
+                    "bbox": info.get("bbox", {}),
                 }
 
                 # Add GPS coordinates if available
@@ -324,6 +329,66 @@ class VideoProcessor:
 
             with open(RESULTS_DIR / f"{video_id}.json", "w") as f:
                 json.dump(results, f, indent=2)
+
+            # === Save detections to database ===
+            try:
+                db = SessionLocal()
+                saved_count = 0
+
+                for pothole in pothole_list:
+                    lat = pothole.get("lat")
+                    lng = pothole.get("lng")
+
+                    # Map GPS to location hierarchy
+                    project_id = None
+                    package_id = None
+                    location_id = None
+
+                    if lat and lng:
+                        location = find_location_by_gps(db, lat, lng)
+                        if location:
+                            location_id = location.id
+                            package_id = location.package_id
+                            # Get project_id from package
+                            if location.package:
+                                project_id = location.package.project_id
+
+                    # Save detection to database
+                    crud.create_detection(
+                        db=db,
+                        video_id=video_id,
+                        frame_number=pothole["first_detected_frame"],
+                        timestamp_ms=int(pothole["first_detected_time"] * 1000),
+                        confidence=pothole["confidence"],
+                        detection_type="pothole",
+                        class_name="pothole",
+                        bounding_box=pothole.get("bbox", {}),
+                        latitude=lat,
+                        longitude=lng,
+                        project_id=project_id,
+                        package_id=package_id,
+                        location_id=location_id,
+                    )
+                    saved_count += 1
+
+                # Update processing status in database
+                crud.update_processing_status(
+                    db=db,
+                    video_id=video_id,
+                    status=ProcessingStatusEnum.COMPLETED,
+                    progress=100,
+                    result_summary=results["summary"],
+                )
+
+                db.commit()
+                logger.info(
+                    f"Saved {saved_count} pothole detections to database for {video_id}"
+                )
+
+            except Exception as db_error:
+                logger.error(f"Database save error: {db_error}")
+            finally:
+                db.close()
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
 

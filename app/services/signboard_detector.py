@@ -1,3 +1,6 @@
+'''
+This module processes videos to detect signboards
+'''
 import cv2
 import json
 import asyncio

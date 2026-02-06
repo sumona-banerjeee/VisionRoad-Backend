@@ -1,3 +1,7 @@
+'''
+This module processes videos to detect potholes
+'''
+
 import cv2
 import json
 import asyncio
@@ -20,6 +24,7 @@ from app.models.processing import ProcessingStatusEnum
 logger = logging.getLogger(__name__)
 
 # Configuration
+MODEL_PATH ="models/best.pt"
 TRACKER = "bytetrack.yaml"
 MIN_DETECTION_FRAMES = 3
 DETECTION_TIME_WINDOW = 1.0
@@ -35,7 +40,7 @@ class VideoProcessor:
         """Initialize video processor with YOLO model on GPU"""
         try:
             logger.info(f"Loading model on device: {DEVICE}")
-            self.model = YOLO("models/best.pt")
+            self.model = YOLO(MODEL_PATH)
 
             if DEVICE == "cuda:0":
                 self.model.to(DEVICE)

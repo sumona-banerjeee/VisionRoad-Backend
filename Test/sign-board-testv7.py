@@ -1,8 +1,9 @@
-'''
+"""
 ===============
 NEW MODEL
 ===============
-'''
+"""
+
 import cv2
 import json
 import uuid
@@ -13,21 +14,11 @@ from ultralytics import YOLO
 # ===================== CONFIG =====================
 MODEL_PATH = r"models\pothole-signboard.pt"
 VIDEO_PATH = r"Test\video\sign-short.mp4"
-OUTPUT_VIDEO_PATH = r"Test\output\outputvideo-v6.mp4"
-OUTPUT_JSON_PATH = r"Test\output\output-v6.json"    
+OUTPUT_VIDEO_PATH = r"Test\output\outputvideo-v7.mp4"
+OUTPUT_JSON_PATH = r"Test\output\output-v7.json"
 
 CONF_THRESHOLD = 0.6
 TRACKER = "bytetrack.yaml"
-
-# Multi-frame confirmation settings
-MIN_DETECTION_FRAMES = 2  # Must appear in at least 2 frames
-DETECTION_TIME_WINDOW = 1.5  # Within 1.5 seconds
-
-# Spatial deduplication settings
-MIN_DISTANCE_THRESHOLD = 100  # pixels - minimum distance to consider as different signboard 
-TIME_THRESHOLD = (
-    4.0  # seconds - time window for spatial deduplication 
-)
 
 # ===================== LOAD MODEL =====================
 model = YOLO(MODEL_PATH)
@@ -38,6 +29,54 @@ fps = float(cap.get(cv2.CAP_PROP_FPS))
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+video_duration = total_frames / fps  # Total video duration in seconds
+
+# ===================== ADAPTIVE PARAMETERS =====================
+# These parameters now scale with video duration!
+
+# Percentage-based time windows
+DETECTION_TIME_WINDOW_PERCENT = (
+    0.25  # 25% of video duration (increased for better catch rate)
+)
+TIME_THRESHOLD_PERCENT = 0.30  # 30% of video duration
+
+# Confidence-based confirmation thresholds
+HIGH_CONFIDENCE_THRESHOLD = (
+    0.75  # High confidence detections get immediate confirmation
+)
+LOW_CONFIDENCE_MIN_FRAMES = 2  # Low confidence needs multiple frames
+
+# Calculate actual time values based on video duration
+DETECTION_TIME_WINDOW = video_duration * DETECTION_TIME_WINDOW_PERCENT
+TIME_THRESHOLD = video_duration * TIME_THRESHOLD_PERCENT
+
+# For very short videos, use relaxed confirmation
+if video_duration < 5.0:
+    DEFAULT_MIN_FRAMES = 1  # Single-frame confirmation for short videos
+    print("⚠️  SHORT VIDEO DETECTED - Using relaxed single-frame confirmation")
+else:
+    DEFAULT_MIN_FRAMES = 2  # Multi-frame confirmation for normal videos
+
+# Note: Actual MIN_DETECTION_FRAMES will be dynamically set based on confidence
+
+# Spatial threshold remains fixed (pixel-based, not time-based)
+MIN_DISTANCE_THRESHOLD = 100  # pixels
+
+# ===================== PARAMETER LOGGING =====================
+print("=" * 60)
+print("ADAPTIVE DETECTION PARAMETERS (v7)")
+print("=" * 60)
+print(f"Video Duration: {video_duration:.2f}s ({total_frames} frames @ {fps:.1f} FPS)")
+print(
+    f"Detection Time Window: {DETECTION_TIME_WINDOW:.2f}s ({DETECTION_TIME_WINDOW_PERCENT*100:.0f}% of video)"
+)
+print(
+    f"Deduplication Window: {TIME_THRESHOLD:.2f}s ({TIME_THRESHOLD_PERCENT*100:.0f}% of video)"
+)
+print(f"Min Frames (High Conf): 1, (Low Conf): {LOW_CONFIDENCE_MIN_FRAMES}")
+print(f"Spatial Distance Threshold: {MIN_DISTANCE_THRESHOLD}px")
+print("=" * 60)
+print()
 
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 video_writer = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, fps, (width, height))
@@ -58,10 +97,17 @@ output_json = {
     "video_info": {
         "total_frames": int(total_frames),
         "fps": float(fps),
-        "duration": float(round(total_frames / fps, 2)),
+        "duration": float(round(video_duration, 2)),
         "width": int(width),
         "height": int(height),
         "resolution": f"{width}x{height}",
+    },
+    "detection_config": {
+        "detection_time_window": float(round(DETECTION_TIME_WINDOW, 2)),
+        "time_threshold": float(round(TIME_THRESHOLD, 2)),
+        "high_confidence_threshold": float(HIGH_CONFIDENCE_THRESHOLD),
+        "low_confidence_min_frames": int(LOW_CONFIDENCE_MIN_FRAMES),
+        "min_distance_threshold": int(MIN_DISTANCE_THRESHOLD),
     },
     "summary": {
         "total_frames": int(total_frames),
@@ -75,14 +121,17 @@ output_json = {
 }
 
 # Tracking structures
-tracker_history = defaultdict(
-    lambda: deque(maxlen=20)
-)  # Track ID -> deque of timestamps
-confirmed = {}  # Track ID -> signboard data (after multi-frame confirmation)
+tracker_history = defaultdict(lambda: deque(maxlen=50))  # Increased for longer videos
+confirmed = {}
 counted_ids = set()
-spatial_locations = (
-    []
-)  # List of {center: (x,y), time: T, class: name} for deduplication
+spatial_locations = []
+
+# Rejection tracking for debugging
+rejection_stats = {
+    "multi_frame_pending": set(),  # Track IDs waiting for confirmation
+    "spatial_duplicate": 0,
+    "roi_outside": 0,
+}
 
 frame_id = 0
 
@@ -92,10 +141,29 @@ def calculate_distance(p1, p2):
     return ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
 
 
+def find_closest_match(cx, cy, class_name):
+    """Find the closest matching signboard in spatial_locations"""
+    closest = None
+    min_distance = float("inf")
+
+    for existing in spatial_locations:
+        if existing["class"] == class_name:
+            distance = calculate_distance((cx, cy), existing["center"])
+            if distance < min_distance:
+                min_distance = distance
+                closest = {
+                    "distance": distance,
+                    "time": existing["time"],
+                    "center": existing["center"],
+                }
+
+    return closest
+
+
 def is_duplicate_location(cx, cy, class_name, current_time):
     """
     Check if this location/class was already counted recently.
-    Returns True if duplicate, False if unique.
+    Returns (is_duplicate: bool, reason: str)
     """
     for existing in spatial_locations:
         prev_cx, prev_cy = existing["center"]
@@ -112,19 +180,14 @@ def is_duplicate_location(cx, cy, class_name, current_time):
             and distance < MIN_DISTANCE_THRESHOLD
             and time_gap < TIME_THRESHOLD
         ):
-            return True
+            reason = f"{distance:.1f}px from existing, {time_gap:.2f}s ago"
+            return True, reason
 
-    return False
+    return False, None
 
 
 # ===================== PROCESS VIDEO =====================
-print(f"Processing video: {VIDEO_PATH}")
-print(
-    f"Multi-frame confirmation: {MIN_DETECTION_FRAMES} frames in {DETECTION_TIME_WINDOW}s window"
-)
-print(
-    f"Spatial deduplication: {MIN_DISTANCE_THRESHOLD}px threshold, {TIME_THRESHOLD}s window"
-)
+print("Processing video...")
 print("-" * 60)
 
 while cap.isOpened():
@@ -160,6 +223,10 @@ while cap.isOpened():
             # ROI check
             in_roi = ROI_LEFT < cx < ROI_RIGHT and ROI_TOP < cy < ROI_BOTTOM
             if not in_roi:
+                print(
+                    f"⊗ Frame {frame_id}: ID {tid} - {class_name} OUTSIDE ROI at ({cx}, {cy})"
+                )
+                rejection_stats["roi_outside"] += 1
                 continue
 
             class_name = str(model.names[cid])
@@ -174,11 +241,29 @@ while cap.isOpened():
                 if current_time - t <= DETECTION_TIME_WINDOW
             ]
 
-            # Multi-frame confirmation: Only confirm if seen in MIN_DETECTION_FRAMES+
-            if len(recent_detections) >= MIN_DETECTION_FRAMES and tid not in confirmed:
+            # Confidence-based multi-frame requirement
+            # High confidence (≥0.75) = immediate confirmation (1 frame)
+            # Low confidence (<0.75) = needs multiple frames
+            if conf >= HIGH_CONFIDENCE_THRESHOLD:
+                MIN_FRAMES_NEEDED = 1  # High confidence = single frame OK
+            else:
+                MIN_FRAMES_NEEDED = (
+                    LOW_CONFIDENCE_MIN_FRAMES  # Low confidence = need 2+ frames
+                )
+
+            # Debug: Show all detections
+            print(
+                f"🔍 Frame {frame_id:3d}: ID {tid:2d} - {class_name:25s} "
+                f"conf={conf:.2f}, frames={len(recent_detections)}/{MIN_FRAMES_NEEDED}"
+            )
+
+            # Multi-frame confirmation
+            if len(recent_detections) >= MIN_FRAMES_NEEDED and tid not in confirmed:
 
                 # Spatial deduplication check
-                if not is_duplicate_location(cx, cy, class_name, current_time):
+                is_dup, reason = is_duplicate_location(cx, cy, class_name, current_time)
+
+                if not is_dup:
                     # This is a NEW confirmed signboard
                     confirmed[tid] = {
                         "signboard_id": tid,
@@ -197,15 +282,32 @@ while cap.isOpened():
                         {"center": (cx, cy), "time": current_time, "class": class_name}
                     )
 
+                    # Remove from pending if it was there
+                    rejection_stats["multi_frame_pending"].discard(tid)
+
                     print(
-                        f"✓ Frame {frame_id}: Confirmed signboard ID {tid} ({class_name}) at ({cx}, {cy})"
+                        f"✅ Frame {frame_id:3d} ({current_time:5.2f}s): "
+                        f"CONFIRMED ID {tid:2d} - {class_name:25s} at ({cx:4d}, {cy:4d}) "
+                        f"[conf={conf:.2f}, frames={len(recent_detections)}]"
                     )
                 else:
+                    # Spatial duplicate
+                    rejection_stats["spatial_duplicate"] += 1
+                    closest = find_closest_match(cx, cy, class_name)
                     print(
-                        f"✗ Frame {frame_id}: Rejected duplicate - ID {tid} ({class_name}) too close to existing detection"
+                        f"❌ Frame {frame_id:3d} ({current_time:5.2f}s): "
+                        f"DUPLICATE ID {tid:2d} - {class_name:25s}"
                     )
+                    print(f"   Reason: {reason}")
 
-            # Count total detections (even unconfirmed)
+            elif tid not in confirmed:
+                # Still waiting for multi-frame confirmation
+                rejection_stats["multi_frame_pending"].add(tid)
+                print(
+                    f"   ⏳ Waiting for {MIN_FRAMES_NEEDED - len(recent_detections)} more frame(s)..."
+                )
+
+            # Count total detections (only confirmed ones)
             if tid in confirmed:
                 output_json["summary"]["total_detections"] += 1
 
@@ -254,7 +356,7 @@ while cap.isOpened():
     )
 
     video_writer.write(annotated_frame)
-    cv2.imshow("Signboard Detection v6", annotated_frame)
+    cv2.imshow("Signboard Detection v7 (Adaptive)", annotated_frame)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
@@ -272,13 +374,32 @@ output_json["summary"]["detection_rate"] = float(
 with open(OUTPUT_JSON_PATH, "w") as f:
     json.dump(output_json, f, indent=2)
 
+# ===================== FINAL REPORT =====================
 print("\n" + "=" * 60)
-print("✓ Processing complete!")
+print("✓ PROCESSING COMPLETE (v7 - Adaptive)")
 print("=" * 60)
-print(f"Unique signboards confirmed: {len(counted_ids)}")
-print(f"Total detections (all frames): {output_json['summary']['total_detections']}")
-print(f"Detection rate: {output_json['summary']['detection_rate']}%")
-print(f"\nJSON saved: {OUTPUT_JSON_PATH}")
+print(f"Video Duration: {video_duration:.2f}s")
+print(f"Unique Signboards Confirmed: {len(counted_ids)}")
+print(f"Total Detections (all frames): {output_json['summary']['total_detections']}")
+print(f"Detection Rate: {output_json['summary']['detection_rate']}%")
+print()
+print("Rejection Statistics:")
+print(
+    f"  - Multi-frame pending (not confirmed): {len(rejection_stats['multi_frame_pending'])}"
+)
+print(f"  - Spatial duplicates rejected: {rejection_stats['spatial_duplicate']}")
+print(f"  - Outside ROI: {rejection_stats['roi_outside']}")
+print()
+print("Adaptive Parameters Used:")
+print(
+    f"  - Detection window: {DETECTION_TIME_WINDOW:.2f}s ({DETECTION_TIME_WINDOW_PERCENT*100:.0f}%)"
+)
+print(
+    f"  - Deduplication window: {TIME_THRESHOLD:.2f}s ({TIME_THRESHOLD_PERCENT*100:.0f}%)"
+)
+print(f"  - Min frames required: {DEFAULT_MIN_FRAMES}")
+print()
+print(f"JSON saved: {OUTPUT_JSON_PATH}")
 print(f"Video saved: {OUTPUT_VIDEO_PATH}")
 print("=" * 60)
 
@@ -292,3 +413,6 @@ if counted_ids:
             f"Time {sb['first_detected_time']}s, "
             f"Conf {sb['confidence']})"
         )
+else:
+    print("\n⚠️  No signboards confirmed!")
+    print("Check the rejection statistics above to see why.")

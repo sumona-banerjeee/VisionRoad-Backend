@@ -1,3 +1,9 @@
+'''
+===============
+OLD MODEL
+===============
+'''
+
 import cv2
 import json
 import uuid
@@ -5,13 +11,11 @@ from datetime import datetime
 from ultralytics import YOLO
 
 # ===================== CONFIG =====================
-MODEL_PATH = r"models\pothole-signboard.pt"
-VIDEO_PATH = r"Test\video\Dash_Cam_Highway_Curve_Video.mp4"
-OUTPUT_VIDEO_PATH = r"Test\output\outputvideo.mp4"
-OUTPUT_JSON_PATH = r"Test\output\output.json"
+MODEL_PATH = r"models\best-board-v2.pt"
+VIDEO_PATH = r"Test\video\sign-short.mp4"
+OUTPUT_VIDEO_PATH = r"Test\output\outputvideo-v5.mp4"
+OUTPUT_JSON_PATH = r"Test\output\output-v5.json"
 CONF_THRESHOLD = 0.6
-
-TRACKER = "bytetrack.yaml"
 
 # ===================== LOAD MODEL =====================
 model = YOLO(MODEL_PATH)
@@ -77,8 +81,7 @@ while cap.isOpened():
     results = model.track(
         frame, 
         persist=True,
-        conf=CONF_THRESHOLD, 
-        tracker=TRACKER
+        conf=CONF_THRESHOLD
     )
     annotated_frame = results[0].plot()
 

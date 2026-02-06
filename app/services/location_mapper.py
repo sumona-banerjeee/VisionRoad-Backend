@@ -29,19 +29,27 @@ def find_location_by_gps(
         >>> if location:
         >>>     print(f"Detection in {location.segment_name}")
     """
-    # Get all locations (optionally filtered by package)
-    query = db.query(Location)
+    """
+    Find location that contains the given GPS coordinate.
+
+    Uses database query with OR conditions to handle road segments defined in either direction.
+    """
+    # Create filters for latitude and longitude (handling both directions)
+    # Lat between start and end OR between end and start
+    lat_filter = ((Location.start_lat <= lat) & (lat <= Location.end_lat)) | \
+                 ((Location.end_lat <= lat) & (lat <= Location.start_lat))
+    
+    # Lng between start and end OR between end and start
+    lng_filter = ((Location.start_lng <= lng) & (lng <= Location.end_lng)) | \
+                 ((Location.end_lng <= lng) & (lng <= Location.start_lng))
+    
+    query = db.query(Location).filter(lat_filter, lng_filter)
+    
     if package_id:
         query = query.filter(Location.package_id == package_id)
 
-    locations = query.all()
-
-    # Check each location's bounding box using contains_point
-    for location in locations:
-        if location.contains_point(lat, lng):
-            return location
-
-    return None
+    # Return the first matching location
+    return query.first()
 
 
 def get_location_hierarchy(db: Session, location_id: str) -> Optional[dict]:

@@ -12,6 +12,9 @@ from collections import defaultdict, deque
 from fastapi import HTTPException
 from ultralytics import YOLO
 from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
+from threading import Thread, Event
+import time
 
 from app.ws.websocket_manager import manager
 from app.core.storage import processing_status, detection_results, RESULTS_DIR
@@ -19,6 +22,7 @@ from app.db.database import SessionLocal
 from app.db import crud
 from app.services.location_mapper import find_location_by_gps
 from app.models.processing import ProcessingStatusEnum
+from app.models.detection import Detection
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +47,12 @@ class SignBoardDetector:
     def __init__(self):
         """Initialize sign board detector with YOLO model on GPU"""
         try:
-            logger.info(f"Loading sign board model on device: {DEVICE}")
-            self.model = YOLO(MODEL_PATH)
+            # Check for TensorRT engine first
+            engine_path = Path(MODEL_PATH).with_suffix(".engine")
+            final_model_path = str(engine_path) if engine_path.exists() else MODEL_PATH
+            
+            logger.info(f"Loading sign board model from {final_model_path} on device: {DEVICE}")
+            self.model = YOLO(final_model_path)
 
             if DEVICE == "cuda:0":
                 self.model.to(DEVICE)
@@ -86,7 +94,7 @@ class SignBoardDetector:
 
     # === Main detection function for a single frame ===
     def detect_frame(
-        self, frame, frame_id, results_log, tracker, confirmed, current_time, fps
+        self, frame, frame_id, tracker, confirmed, current_time, fps
     ):
         """Detect sign boards in a single frame with tracking"""
         h, w = frame.shape[:2]
@@ -98,6 +106,7 @@ class SignBoardDetector:
         roi_bottom = int(h * ROI_BOTTOM_RATIO)
 
         detections = []
+        new_confirmed = []
 
         try:
             results = self.model.track(
@@ -140,7 +149,7 @@ class SignBoardDetector:
 
                     # Track first detection
                     if track_id not in confirmed:
-                        confirmed[track_id] = {
+                        signboard_data = {
                             "signboard_id": track_id,
                             "type": class_name,
                             "first_detected_frame": frame_id,
@@ -149,6 +158,8 @@ class SignBoardDetector:
                             "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                             "center": {"x": cx, "y": cy},
                         }
+                        confirmed[track_id] = signboard_data
+                        new_confirmed.append((track_id, signboard_data))
 
                     # Calculate area
                     area = (x2 - x1) * (y2 - y1)
@@ -165,20 +176,20 @@ class SignBoardDetector:
                         }
                     )
 
+            frame_result = None
             if detections:
-                results_log["frames"].append(
-                    {"frame_id": frame_id, "signboards": detections}
-                )
+                frame_result = {"frame_id": frame_id, "signboards": detections}
 
         except Exception as e:
             logger.error(f"Sign board detection error: {e}")
+            frame_result = None
 
-        return len(detections)
+        return len(detections), new_confirmed, frame_result
 
     def _process_video_blocking(
         self, video_id: str, video_path: str, json_path: str, speed: int, loop
     ):
-        """Process video in blocking thread"""
+        """Process video in blocking thread with pipeline pattern"""
         try:
             asyncio.run_coroutine_threadsafe(
                 manager.send_message(
@@ -187,7 +198,7 @@ class SignBoardDetector:
                 loop,
             )
 
-            # Load GPS data from JSON file
+            # Load GPS data
             gps_points = []
             if json_path and Path(json_path).exists():
                 try:
@@ -213,13 +224,176 @@ class SignBoardDetector:
                 f"Processing sign board detection for {video_id}: {total_frames} frames @ {fps:.1f} FPS"
             )
 
+            # Shared state
             results_log = {"frames": []}
+            signboard_list = []
+            
+            # Tracking state (Only accessed by Inference Thread)
             tracker = defaultdict(lambda: deque(maxlen=20))
             confirmed = {}
-            total_detections = 0
-            frame_count = 0
-            last_progress = 0
 
+            # Queues
+            inference_queue = Queue(maxsize=30)
+            post_proc_queue = Queue(maxsize=100)
+            
+            # Counters
+            total_detections = 0 
+            frames_processed_count = 0
+
+            # --- Worker Functions ---
+            
+            def inference_worker():
+                """Consumes frames, runs inference, produces results"""
+                nonlocal total_detections
+                while True:
+                    item = inference_queue.get()
+                    if item is None:
+                        post_proc_queue.put(None) 
+                        inference_queue.task_done()
+                        break
+                    
+                    frame, frame_id, current_time = item
+                    
+                    try:
+                        n, new_confirmed, frame_result = self.detect_frame(
+                            frame, frame_id, tracker, confirmed, current_time, fps
+                        )
+                        total_detections += n
+                        
+                        # Send result to post-processing
+                        post_proc_queue.put((frame_result, new_confirmed))
+                        
+                    except Exception as e:
+                        logger.error(f"Inference error frame {frame_id}: {e}")
+                    
+                    inference_queue.task_done()
+
+            def post_proc_worker():
+                """Consumes results, handles DB batching, logging"""
+                nonlocal frames_processed_count
+                
+                db = SessionLocal()
+                db_buffer = [] 
+                last_progress = 0
+                
+                try:
+                    while True:
+                        item = post_proc_queue.get()
+                        if item is None:
+                            break
+                        
+                        frame_result, new_confirmed = item
+                        frames_processed_count += 1
+                        
+                        # 1. Update results log
+                        if frame_result:
+                            results_log["frames"].append(frame_result)
+                        
+                        # 2. Process new confirmed signboards
+                        for sid, info in new_confirmed:
+                            signboard_data = {
+                                "signboard_id": int(sid),
+                                "type": info["type"],
+                                "first_detected_frame": info["first_detected_frame"],
+                                "first_detected_time": round(info["first_detected_time"], 2),
+                                "confidence": round(float(info["confidence"]), 3),
+                                "bbox": info.get("bbox", {}),
+                            }
+                            
+                            # Map GPS
+                            lat, lng = None, None
+                            if gps_points:
+                                gps_coords = self.find_nearest_gps(
+                                    info["first_detected_time"], gps_points
+                                )
+                                lat = gps_coords["lat"]
+                                lng = gps_coords["lng"]
+                                signboard_data["lat"] = lat
+                                signboard_data["lng"] = lng
+                            
+                            signboard_list.append(signboard_data)
+                            
+                            # Prepare for DB Batch
+                            project_id = None
+                            package_id = None
+                            location_id = None
+
+                            if lat and lng:
+                                location = find_location_by_gps(db, lat, lng)
+                                if location:
+                                    location_id = location.id
+                                    package_id = location.package_id
+                                    if location.package:
+                                        project_id = location.package.project_id
+                            
+                            # Create Detection object manually
+                            detection = Detection(
+                                video_id=video_id,
+                                frame_number=signboard_data["first_detected_frame"],
+                                timestamp_ms=int(signboard_data["first_detected_time"] * 1000),
+                                confidence=signboard_data["confidence"],
+                                detection_type="signboard",
+                                class_name=signboard_data["type"],
+                                latitude=lat,
+                                longitude=lng,
+                                project_id=project_id,
+                                package_id=package_id,
+                                location_id=location_id,
+                            )
+                            detection.set_bounding_box(signboard_data.get("bbox", {}))
+                            db_buffer.append(detection)
+
+                        # 3. Batch DB Insert
+                        if len(db_buffer) >= 50:
+                            try:
+                                crud.create_detections_bulk(db, db_buffer)
+                                logger.info(f"Bulk saved {len(db_buffer)} signboard detections")
+                                db_buffer = []
+                            except Exception as e:
+                                logger.error(f"Bulk save error: {e}")
+                                db.rollback()
+
+                        # 4. Progress Update
+                        progress = int((frames_processed_count / total_frames) * 100)
+                        if progress - last_progress >= 5:
+                            processing_status[video_id]["progress"] = progress
+                            asyncio.run_coroutine_threadsafe(
+                                manager.send_message(
+                                    video_id,
+                                    {
+                                        "type": "progress",
+                                        "progress": progress,
+                                        "unique_signboards": len(signboard_list),
+                                        "total_detections": total_detections,
+                                    },
+                                ),
+                                loop,
+                            )
+                            last_progress = progress
+                        
+                        post_proc_queue.task_done()
+                    
+                    # Flush remaining
+                    if db_buffer:
+                        try:
+                            crud.create_detections_bulk(db, db_buffer)
+                            logger.info(f"Bulk saved final {len(db_buffer)} signboards")
+                        except Exception as e:
+                            logger.error(f"Final bulk save error: {e}")
+                            db.rollback()
+                            
+                finally:
+                    db.close()
+                    post_proc_queue.task_done()
+
+            # --- Start Pipeline ---
+            inf_thread = Thread(target=inference_worker, daemon=True)
+            pp_thread = Thread(target=post_proc_worker, daemon=True)
+            inf_thread.start()
+            pp_thread.start()
+
+            # --- Main Loop (Producer) ---
+            frame_count = 0
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
@@ -227,70 +401,28 @@ class SignBoardDetector:
 
                 frame_count += 1
                 current_time = frame_count / fps
-
-                n = self.detect_frame(
-                    frame,
-                    frame_count,
-                    results_log,
-                    tracker,
-                    confirmed,
-                    current_time,
-                    fps,
-                )
-                total_detections += n
-
-                # Progress update every 5%
-                progress = int((frame_count / total_frames) * 100)
-                if progress - last_progress >= 5:
-                    processing_status[video_id]["progress"] = progress
-                    asyncio.run_coroutine_threadsafe(
-                        manager.send_message(
-                            video_id,
-                            {
-                                "type": "progress",
-                                "progress": progress,
-                                "unique_signboards": len(confirmed),
-                                "total_detections": total_detections,
-                            },
-                        ),
-                        loop,
-                    )
-                    last_progress = progress
+                
+                inference_queue.put((frame, frame_count, current_time))
 
             cap.release()
+            
+            # Signal end
+            inference_queue.put(None)
+            
+            inf_thread.join()
+            pp_thread.join()
+            
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-            # Build results with GPS coordinates
-            signboard_list = []
-            for info in confirmed.values():
-                signboard_data = {
-                    "signboard_id": info["signboard_id"],
-                    "type": info["type"],
-                    "first_detected_frame": info["first_detected_frame"],
-                    "first_detected_time": info["first_detected_time"],
-                    "confidence": info["confidence"],
-                    "bbox": info.get("bbox", {}),
-                }
-
-                # Add GPS coordinates if available
-                if gps_points:
-                    gps_coords = self.find_nearest_gps(
-                        info["first_detected_time"], gps_points
-                    )
-                    signboard_data["lat"] = gps_coords["lat"]
-                    signboard_data["lng"] = gps_coords["lng"]
-
-                signboard_list.append(signboard_data)
-
-            # Sort by first detected frame
+            # --- Finalize Results ---
             signboard_list = sorted(
                 signboard_list, key=lambda x: x["first_detected_frame"]
             )
 
             frames_with_detections = len(results_log["frames"])
             detection_rate = (
-                round((frames_with_detections / frame_count) * 100, 2)
-                if frame_count > 0
+                round((frames_with_detections / total_frames) * 100, 2)
+                if total_frames > 0
                 else 0
             )
 
@@ -308,8 +440,8 @@ class SignBoardDetector:
                     "resolution": f"{width}x{height}",
                 },
                 "summary": {
-                    "total_frames": frame_count,
-                    "unique_signboards": len(confirmed),
+                    "total_frames": total_frames,
+                    "unique_signboards": len(signboard_list),
                     "total_detections": total_detections,
                     "frames_with_detections": frames_with_detections,
                     "detection_rate": detection_rate,
@@ -323,48 +455,9 @@ class SignBoardDetector:
             with open(RESULTS_DIR / f"{video_id}.json", "w") as f:
                 json.dump(results, f, indent=2)
 
-            # === Save detections to database ===
+            # Update final status
+            db = SessionLocal()
             try:
-                db = SessionLocal()
-                saved_count = 0
-
-                for signboard in signboard_list:
-                    lat = signboard.get("lat")
-                    lng = signboard.get("lng")
-
-                    # Map GPS to location hierarchy
-                    project_id = None
-                    package_id = None
-                    location_id = None
-
-                    if lat and lng:
-                        location = find_location_by_gps(db, lat, lng)
-                        if location:
-                            location_id = location.id
-                            package_id = location.package_id
-                            # Get project_id from package
-                            if location.package:
-                                project_id = location.package.project_id
-
-                    # Save detection to database
-                    crud.create_detection(
-                        db=db,
-                        video_id=video_id,
-                        frame_number=signboard["first_detected_frame"],
-                        timestamp_ms=int(signboard["first_detected_time"] * 1000),
-                        confidence=signboard["confidence"],
-                        detection_type="signboard",
-                        class_name=signboard["type"],
-                        bounding_box=signboard.get("bbox", {}),
-                        latitude=lat,
-                        longitude=lng,
-                        project_id=project_id,
-                        package_id=package_id,
-                        location_id=location_id,
-                    )
-                    saved_count += 1
-
-                # Update processing status in database
                 crud.update_processing_status(
                     db=db,
                     video_id=video_id,
@@ -372,14 +465,7 @@ class SignBoardDetector:
                     progress=100,
                     result_summary=results["summary"],
                 )
-
                 db.commit()
-                logger.info(
-                    f"Saved {saved_count} signboard detections to database for {video_id}"
-                )
-
-            except Exception as db_error:
-                logger.error(f"Database save error: {db_error}")
             finally:
                 db.close()
 
@@ -397,24 +483,12 @@ class SignBoardDetector:
                 loop,
             )
 
-            # Detailed logging
-            unique_ids = sorted([s["signboard_id"] for s in signboard_list])
+            # Log summary
             logger.info("=" * 60)
             logger.info(f"SIGN BOARD DETECTION COMPLETE: {video_id}")
-            logger.info(f"Total frames: {frame_count}")
-            logger.info(f"Total detections: {total_detections}")
-            logger.info(f">>> UNIQUE SIGNBOARDS: {len(confirmed)} <<<")
-            logger.info(f"Signboard IDs: {unique_ids}")
+            logger.info(f"Frames: {total_frames} | Signboards: {len(signboard_list)}")
             logger.info("=" * 60)
-            print(f"\n{'='*60}")
-            print(f"SIGN BOARD DETECTION COMPLETE")
-            print(f"{'='*60}")
-            print(f"Video ID: {video_id}")
-            print(f"Frames: {frame_count} | Device: {DEVICE}")
-            print(f"Total detections: {total_detections}")
-            print(f">>> UNIQUE SIGNBOARDS: {len(confirmed)} <<<")
-            print(f"Signboard IDs: {unique_ids}")
-            print(f"{'='*60}\n")
+            
             return results
 
         except Exception as e:

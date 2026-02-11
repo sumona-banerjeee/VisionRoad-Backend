@@ -7,12 +7,16 @@ from app.routes.package_routes import router as package_router
 from app.routes.location_routes import router as location_router
 from app.routes.summary_routes import router as summary_router
 from app.db.database import init_db
+from app.core.logging_config import setup_logging
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
-    # Startup: Initialize database
+    # Startup: Initialize logging first
+    setup_logging()
+
+    # Initialize database
     init_db()
     print("✓ Database initialized")
     yield

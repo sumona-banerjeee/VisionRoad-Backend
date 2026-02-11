@@ -11,6 +11,7 @@ from app.db import crud
 from app.models.processing import ProcessingStatusEnum
 from app.services.video_processor import VideoProcessor
 from app.services.signboard_detector import SignBoardDetector
+from app.services.pot_sign_detector import PotSignDetector
 from app.core.storage import processing_status
 from app.ws.websocket_manager import manager
 
@@ -23,12 +24,14 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 class DetectionType(str, Enum):
     POTHOLE_DETECTION = "pothole-detection"
     SIGN_BOARD_DETECTION = "sign-board-detection"
+    POT_SIGN_DETECTION = "pot-sign-detection"
 
 
 class UploadService:
     def __init__(self):
-        self.pothole_processor = VideoProcessor()
-        self.signboard_processor = SignBoardDetector()
+        self.pothole_processor = VideoProcessor()  # pothole processor
+        self.signboard_processor = SignBoardDetector()  # signboard processor
+        self.pot_sign_processor = PotSignDetector()  # combined pot-sign processor
 
     async def upload_video(
         self,
@@ -102,6 +105,8 @@ class UploadService:
             processor = self.pothole_processor
         elif detection_type == DetectionType.SIGN_BOARD_DETECTION:
             processor = self.signboard_processor
+        elif detection_type == DetectionType.POT_SIGN_DETECTION:
+            processor = self.pot_sign_processor
         else:
             raise HTTPException(
                 status_code=400, detail=f"Invalid detection type: {detection_type}"

@@ -1,6 +1,6 @@
-'''
+"""
 This module processes videos to detect potholes
-'''
+"""
 
 import cv2
 import json
@@ -24,7 +24,7 @@ from app.models.processing import ProcessingStatusEnum
 logger = logging.getLogger(__name__)
 
 # Configuration
-MODEL_PATH ="models/best.pt"
+MODEL_PATH = "models/best.pt"
 TRACKER = "bytetrack.yaml"
 MIN_DETECTION_FRAMES = 3
 DETECTION_TIME_WINDOW = 1.0
@@ -375,15 +375,6 @@ class VideoProcessor:
                         location_id=location_id,
                     )
                     saved_count += 1
-
-                # Update processing status in database
-                crud.update_processing_status(
-                    db=db,
-                    video_id=video_id,
-                    status=ProcessingStatusEnum.COMPLETED,
-                    progress=100,
-                    result_summary=results["summary"],
-                )
 
                 db.commit()
                 logger.info(

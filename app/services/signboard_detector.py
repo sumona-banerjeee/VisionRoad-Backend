@@ -1,6 +1,7 @@
-'''
+"""
 This module processes videos to detect signboards
-'''
+"""
+
 import cv2
 import json
 import asyncio
@@ -363,15 +364,6 @@ class SignBoardDetector:
                         location_id=location_id,
                     )
                     saved_count += 1
-
-                # Update processing status in database
-                crud.update_processing_status(
-                    db=db,
-                    video_id=video_id,
-                    status=ProcessingStatusEnum.COMPLETED,
-                    progress=100,
-                    result_summary=results["summary"],
-                )
 
                 db.commit()
                 logger.info(

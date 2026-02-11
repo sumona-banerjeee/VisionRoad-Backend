@@ -1,6 +1,6 @@
 '''
 ===============
-NEW MODEL
+NEW MODEL + hardcoded params
 ===============
 '''
 import cv2

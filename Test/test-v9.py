@@ -1,6 +1,7 @@
 """
 ===============
-NEW MODEL + dynamic params
+V9 - CLASS LOCKING FIX
+Prevents tracker IDs from switching classes
 ===============
 """
 
@@ -13,12 +14,11 @@ from ultralytics import YOLO
 
 # ===================== CONFIG =====================
 MODEL_PATH = r"models\pothole-signboard.pt"
-INPUT_PATH = r"Test\video\live-vid-1.mp4"  # Can be video or image
+INPUT_PATH = r"Test\video\live-vid-2.mp4"  # Can be video or image
 OUTPUT_DIR = r"Test\output"
 
 CONF_THRESHOLD = 0.50  # set 0.50 for default
-TRACKER = "bytetrack.yaml"
-# TRACKER = "botsort.yaml"  # Change from "bytetrack.yaml"
+TRACKER = "botsort.yaml"  # Using BoT-SORT for better tracking
 
 # ===================== LOAD MODEL =====================
 model = YOLO(MODEL_PATH)
@@ -39,11 +39,11 @@ if not IS_IMAGE and not IS_VIDEO:
 # Generate output paths based on input
 input_basename = os.path.splitext(os.path.basename(INPUT_PATH))[0]
 if IS_IMAGE:
-    OUTPUT_PATH = os.path.join(OUTPUT_DIR, f"{input_basename}-v7.jpg")
-    OUTPUT_JSON_PATH = os.path.join(OUTPUT_DIR, f"{input_basename}-v7.json")
+    OUTPUT_PATH = os.path.join(OUTPUT_DIR, f"{input_basename}-v9.jpg")
+    OUTPUT_JSON_PATH = os.path.join(OUTPUT_DIR, f"{input_basename}-v9.json")
 else:
-    OUTPUT_PATH = os.path.join(OUTPUT_DIR, f"{input_basename}-v7.mp4")
-    OUTPUT_JSON_PATH = os.path.join(OUTPUT_DIR, f"{input_basename}-v7.json")
+    OUTPUT_PATH = os.path.join(OUTPUT_DIR, f"{input_basename}-v9.mp4")
+    OUTPUT_JSON_PATH = os.path.join(OUTPUT_DIR, f"{input_basename}-v9.json")
 
 print("=" * 60)
 print(f"INPUT TYPE: {'IMAGE' if IS_IMAGE else 'VIDEO'}")
@@ -132,6 +132,7 @@ else:
     )
 print(f"Min Frames (High Conf): 1, (Low Conf): {LOW_CONFIDENCE_MIN_FRAMES}")
 print(f"Spatial Distance Threshold: {MIN_DISTANCE_THRESHOLD}px")
+print(f"Tracker: {TRACKER}")
 print("=" * 60)
 print()
 
@@ -168,6 +169,7 @@ output_json = {
         "high_confidence_threshold": float(HIGH_CONFIDENCE_THRESHOLD),
         "low_confidence_min_frames": int(LOW_CONFIDENCE_MIN_FRAMES),
         "min_distance_threshold": int(MIN_DISTANCE_THRESHOLD),
+        "tracker": TRACKER,
     },
     "summary": {
         "total_frames": int(total_frames),
@@ -189,16 +191,17 @@ counted_ids = set()
 counted_potholes = set()  # Track unique pothole IDs
 counted_signboards = set()  # Track unique signboard IDs
 spatial_locations = []
+tracker_class_lock = {}  # ✨ NEW: Lock each tracker ID to its first detected class
 
 # Rejection tracking for debugging
 rejection_stats = {
     "multi_frame_pending": set(),  # Track IDs waiting for confirmation
     "spatial_duplicate": 0,
     "roi_outside": 0,
+    "class_mismatch": 0,  # ✨ NEW: Track class switching attempts
 }
 
 frame_id = 0
-
 
 def calculate_distance(p1, p2):
     """Calculate Euclidean distance between two points"""
@@ -313,6 +316,22 @@ while processing:
                 )
                 rejection_stats["roi_outside"] += 1
                 continue
+
+            # ✨ ===== CLASS LOCKING: Ensure each tracker ID maintains consistent class =====
+            if tid in tracker_class_lock:
+                # ID already has a locked class - verify consistency
+                locked_class = tracker_class_lock[tid]
+                if locked_class != class_name:
+                    print(
+                        f"⚠️  Frame {frame_id}: ID {tid} CLASS MISMATCH - "
+                        f"Expected '{locked_class}', got '{class_name}' (REJECTED)"
+                    )
+                    rejection_stats["class_mismatch"] += 1
+                    continue  # Skip this detection entirely
+            else:
+                # First time seeing this ID - lock it to this class
+                tracker_class_lock[tid] = class_name
+                print(f"🔒 Frame {frame_id}: ID {tid} LOCKED to class '{class_name}'")
 
             # Update temporal tracker
             tracker_history[tid].append(current_time)
@@ -453,7 +472,7 @@ while processing:
         video_writer.write(annotated_frame)
 
     # Display frame
-    window_title = f"{'Image' if IS_IMAGE else 'Video'} Detection v7 (Adaptive)"
+    window_title = f"{'Image' if IS_IMAGE else 'Video'} Detection v9 (Class Locking)"
     cv2.imshow(window_title, annotated_frame)
 
     if cv2.waitKey(1 if IS_VIDEO else 0) & 0xFF == ord("q"):
@@ -476,7 +495,7 @@ with open(OUTPUT_JSON_PATH, "w") as f:
 
 # ===================== FINAL REPORT =====================
 print("\n" + "=" * 60)
-print(f"✓ PROCESSING COMPLETE (v7 - Adaptive {'Image' if IS_IMAGE else 'Video'})")
+print(f"✓ PROCESSING COMPLETE (v9 - Class Locking {'Image' if IS_IMAGE else 'Video'})")
 print("=" * 60)
 if IS_IMAGE:
     print(f"Input Type: IMAGE")
@@ -495,6 +514,9 @@ print(
     f"  - Multi-frame pending (not confirmed): {len(rejection_stats['multi_frame_pending'])}"
 )
 print(f"  - Spatial duplicates rejected: {rejection_stats['spatial_duplicate']}")
+print(
+    f"  - Class mismatches (ID switching): {rejection_stats['class_mismatch']}"
+)  # ✨ NEW
 print(f"  - Outside ROI: {rejection_stats['roi_outside']}")
 print()
 if not IS_IMAGE:

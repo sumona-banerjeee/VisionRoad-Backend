@@ -46,6 +46,7 @@ models/*.weights
 # ====================
 uploads/
 results/
+Test/video/
 Test/output/
 
 # ====================

@@ -1,6 +1,6 @@
 '''
 ===============
-OLD MODEL
+NEW MODEL+ OLD approach
 ===============
 '''
 
@@ -11,8 +11,8 @@ from datetime import datetime
 from ultralytics import YOLO
 
 # ===================== CONFIG =====================
-MODEL_PATH = r"models\best-board-v2.pt"
-VIDEO_PATH = r"Test\video\sign-short.mp4"
+MODEL_PATH = r"models\pothole-signboard.pt"
+VIDEO_PATH = r"Test\video\live-vid-1.mp4"
 OUTPUT_VIDEO_PATH = r"Test\output\outputvideo-v5.mp4"
 OUTPUT_JSON_PATH = r"Test\output\output-v5.json"
 CONF_THRESHOLD = 0.6
@@ -34,7 +34,7 @@ video_writer = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, fps, (width, height))
 ROI_LEFT = int(width * 0.0)
 ROI_RIGHT = int(width * 1.0)
 ROI_TOP = int(height * 0.10)
-ROI_BOTTOM = int(height * 0.70)
+ROI_BOTTOM = int(height * 0.90)
 
 # ===================== JSON STRUCTURE =====================
 video_id = str(uuid.uuid4())

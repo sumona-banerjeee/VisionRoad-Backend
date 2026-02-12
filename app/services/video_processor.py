@@ -24,6 +24,7 @@ from app.db import crud
 from app.services.location_mapper import find_location_by_gps
 from app.models.processing import ProcessingStatusEnum
 from app.models.detection import Detection
+from app.core.model_loader import load_yolo_model
 
 logger = logging.getLogger(__name__)
 
@@ -41,24 +42,33 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 class VideoProcessor:
     def __init__(self):
-        """Initialize video processor with YOLO model on GPU"""
+        """Initialize video processor"""
+        self._model = None
+        logger.info("Video processor initialized (model loading deferred)")
+
+    def _get_model(self):
+        """Lazy load and warmup the model"""
+        if self._model is not None:
+            return self._model
+            
         try:
             # Check for TensorRT engine first
             engine_path = Path(MODEL_PATH).with_suffix(".engine")
             final_model_path = str(engine_path) if engine_path.exists() else MODEL_PATH
             
             logger.info(f"Loading model from {final_model_path} on device: {DEVICE}")
-            self.model = YOLO(final_model_path)
+            self._model = load_yolo_model(final_model_path)
 
             if DEVICE == "cuda:0":
-                self.model.to(DEVICE)
+                self._model.to(DEVICE)
                 logger.info(f"Model loaded on GPU: {torch.cuda.get_device_name(0)}")
             else:
                 logger.info("Model loaded on CPU")
 
             # Warmup
             self._warmup()
-            logger.info("Video processor ready")
+            logger.info("Video processor model ready")
+            return self._model
 
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
@@ -66,11 +76,13 @@ class VideoProcessor:
 
     def _warmup(self):
         """Warmup model for optimal performance"""
+        if self._model is None:
+            return
         try:
             import numpy as np
 
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-            self.model.predict(dummy, verbose=False, device=DEVICE)
+            self._model.predict(dummy, verbose=False, device=DEVICE)
         except:
             pass
 
@@ -113,7 +125,8 @@ class VideoProcessor:
         new_confirmed = []  # List of newly confirmed potholes in this frame
 
         try:
-            results = self.model.track(
+            model = self._get_model()
+            results = model.track(
                 roi,
                 conf=params["conf"],
                 tracker=TRACKER,

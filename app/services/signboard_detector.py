@@ -23,6 +23,7 @@ from app.db import crud
 from app.services.location_mapper import find_location_by_gps
 from app.models.processing import ProcessingStatusEnum
 from app.models.detection import Detection
+from app.core.model_loader import load_yolo_model
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +46,25 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 class SignBoardDetector:
     def __init__(self):
-        """Initialize sign board detector with YOLO model on GPU"""
+        """Initialize sign board detector"""
+        self._model = None
+        logger.info("Sign board detector initialized (model loading deferred)")
+
+    def _get_model(self):
+        """Lazy load and warmup the model"""
+        if self._model is not None:
+            return self._model
+            
         try:
             # Check for TensorRT engine first
             engine_path = Path(MODEL_PATH).with_suffix(".engine")
             final_model_path = str(engine_path) if engine_path.exists() else MODEL_PATH
             
             logger.info(f"Loading sign board model from {final_model_path} on device: {DEVICE}")
-            self.model = YOLO(final_model_path)
+            self._model = load_yolo_model(final_model_path)
 
             if DEVICE == "cuda:0":
-                self.model.to(DEVICE)
+                self._model.to(DEVICE)
                 logger.info(
                     f"Sign board model loaded on GPU: {torch.cuda.get_device_name(0)}"
                 )
@@ -64,7 +73,8 @@ class SignBoardDetector:
 
             # Warmup
             self._warmup()
-            logger.info("Sign board detector ready")
+            logger.info("Sign board detector model ready")
+            return self._model
 
         except Exception as e:
             logger.error(f"Failed to load sign board model: {e}")
@@ -72,11 +82,13 @@ class SignBoardDetector:
 
     def _warmup(self):
         """Warmup model for optimal performance"""
+        if self._model is None:
+            return
         try:
             import numpy as np
 
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-            self.model.predict(dummy, verbose=False, device=DEVICE)
+            self._model.predict(dummy, verbose=False, device=DEVICE)
         except:
             pass
 
@@ -107,16 +119,22 @@ class SignBoardDetector:
 
         detections = []
         new_confirmed = []
+        # Crop to ROI
+        roi = frame[roi_top:roi_bottom, roi_left:roi_right]
+
+        detections = []
+        new_confirmed = []
 
         try:
-            results = self.model.track(
-                frame,
+            model = self._get_model()
+            results = model.track(
+                roi,
                 persist=True,
                 conf=CONFIDENCE_THRESHOLD,
                 # tracker=TRACKER, # affect detection
                 # verbose=False,
                 device=DEVICE,  # use GPU if available
-                # imgsz=640,
+                imgsz=640,
             )
 
             for r in results:
@@ -132,17 +150,16 @@ class SignBoardDetector:
                     continue
 
                 for box, track_id, conf, class_id in zip(boxes, ids, confs, class_ids):
-                    x1, y1, x2, y2 = map(int, box)
+                    rx1, ry1, rx2, ry2 = map(int, box)
                     track_id = int(track_id)
 
-                    # Calculate center
+                    # Adjust coordinates back to full frame
+                    x1, y1 = rx1 + roi_left, ry1 + roi_top
+                    x2, y2 = rx2 + roi_left, ry2 + roi_top
+
+                    # Calculate center in full frame
                     cx = int((x1 + x2) / 2)
                     cy = int((y1 + y2) / 2)
-
-                    # Check if detection is in ROI
-                    in_roi = roi_left < cx < roi_right and roi_top < cy < roi_bottom
-                    if not in_roi:
-                        continue
 
                     # Get class name
                     class_name = str(self.model.names[class_id])

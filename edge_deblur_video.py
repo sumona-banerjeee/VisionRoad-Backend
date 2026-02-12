@@ -104,7 +104,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python edge_deblur_video.py <input_video_path> [output_video_path]")
         # Check for default test file if no args provided
-        test_video = "motion_blurred_video.mp4"
+        test_video = "sign-vid1.mp4"
         if os.path.exists(test_video):
             print(f"No input provided, but found '{test_video}'. Processing it...")
             process_video(test_video)

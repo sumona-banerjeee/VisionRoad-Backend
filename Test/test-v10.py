@@ -389,11 +389,11 @@ while processing:
     current_time = frame_id / fps
 
     # Apply preprocessing to handle lighting variations
-    preprocessed_frame = preprocess_frame(current_frame)
+    # preprocessed_frame = preprocess_frame(current_frame)
 
     # Run detection on preprocessed frame
     results = model.track(
-        preprocessed_frame,
+        current_frame,  # preprocessed_frame
         persist=True,
         conf=CONF_THRESHOLD,
         tracker=TRACKER,

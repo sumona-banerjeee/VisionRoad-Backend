@@ -26,11 +26,25 @@ logger = logging.getLogger(__name__)
 # Configuration
 MODEL_PATH = "models/final-v1.pt"
 TRACKER = "botsort.yaml"  # Using BoT-SORT for better tracking consistency
-CONF_THRESHOLD = 0.50  
+CONF_THRESHOLD = 0.50
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 # Thread pool for blocking operations
 executor = ThreadPoolExecutor(max_workers=4)
+
+# ===================== CLASS DEFINITIONS =====================
+# Road damage classes that will be counted
+ROAD_DAMAGE_CLASSES = {
+    "defected_sign_board",
+    "pothole",
+    "road_crack",
+    "damaged_road_marking",
+}
+
+# Classes detected but not counted as damage
+EXCLUDED_CLASSES = {"good_sign_board"}
+
+ALL_CLASSES = ROAD_DAMAGE_CLASSES | EXCLUDED_CLASSES
 
 
 class PotSignDetector:
@@ -181,8 +195,14 @@ class PotSignDetector:
             tracker_history = defaultdict(lambda: deque(maxlen=50))
             confirmed = {}
             counted_ids = set()
-            counted_potholes = set()
-            counted_signboards = set()
+
+            # Individual class counters
+            counted_defected_sign_board = set()
+            counted_pothole = set()
+            counted_road_crack = set()
+            counted_damaged_road_marking = set()
+            counted_good_sign_board = set()
+
             spatial_locations = []
             tracker_class_lock = {}  # ✨ CLASS LOCKING
 
@@ -301,10 +321,16 @@ class PotSignDetector:
                                 }
 
                                 # Add to appropriate list based on class type
-                                if class_name.lower() == "pothole":
-                                    counted_potholes.add(tid)
-                                else:  # signboard or other sign types
-                                    counted_signboards.add(tid)
+                                if class_name == "defected_sign_board":
+                                    counted_defected_sign_board.add(tid)
+                                elif class_name == "pothole":
+                                    counted_pothole.add(tid)
+                                elif class_name == "road_crack":
+                                    counted_road_crack.add(tid)
+                                elif class_name == "damaged_road_marking":
+                                    counted_damaged_road_marking.add(tid)
+                                elif class_name == "good_sign_board":
+                                    counted_good_sign_board.add(tid)
 
                                 counted_ids.add(tid)
 
@@ -359,8 +385,21 @@ class PotSignDetector:
                             {
                                 "type": "progress",
                                 "progress": progress,
-                                "unique_potholes": len(counted_potholes),
-                                "unique_signboards": len(counted_signboards),
+                                "unique_defected_sign_board": len(
+                                    counted_defected_sign_board
+                                ),
+                                "unique_pothole": len(counted_pothole),
+                                "unique_road_crack": len(counted_road_crack),
+                                "unique_damaged_road_marking": len(
+                                    counted_damaged_road_marking
+                                ),
+                                "unique_good_sign_board": len(counted_good_sign_board),
+                                "total_road_damage": (
+                                    len(counted_defected_sign_board)
+                                    + len(counted_pothole)
+                                    + len(counted_road_crack)
+                                    + len(counted_damaged_road_marking)
+                                ),
                                 "total_detections": total_detections,
                             },
                         ),
@@ -372,8 +411,11 @@ class PotSignDetector:
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
             # Build results with GPS coordinates
+            defected_sign_board_list = []
             pothole_list = []
-            signboard_list = []
+            road_crack_list = []
+            damaged_road_marking_list = []
+            good_sign_board_list = []
 
             for tid, info in confirmed.items():
                 detection_data = {
@@ -393,16 +435,32 @@ class PotSignDetector:
                     detection_data["lat"] = gps_coords["lat"]
                     detection_data["lng"] = gps_coords["lng"]
 
-                # Separate into pothole and signboard lists
-                if info["type"].lower() == "pothole":
+                # Separate into individual class lists
+                class_type = info["type"]
+                if class_type == "defected_sign_board":
+                    defected_sign_board_list.append(detection_data)
+                elif class_type == "pothole":
                     pothole_list.append(detection_data)
-                else:
-                    signboard_list.append(detection_data)
+                elif class_type == "road_crack":
+                    road_crack_list.append(detection_data)
+                elif class_type == "damaged_road_marking":
+                    damaged_road_marking_list.append(detection_data)
+                elif class_type == "good_sign_board":
+                    good_sign_board_list.append(detection_data)
 
-            # Sort by first detected frame
+            # Sort all lists by first detected frame
+            defected_sign_board_list = sorted(
+                defected_sign_board_list, key=lambda x: x["first_detected_frame"]
+            )
             pothole_list = sorted(pothole_list, key=lambda x: x["first_detected_frame"])
-            signboard_list = sorted(
-                signboard_list, key=lambda x: x["first_detected_frame"]
+            road_crack_list = sorted(
+                road_crack_list, key=lambda x: x["first_detected_frame"]
+            )
+            damaged_road_marking_list = sorted(
+                damaged_road_marking_list, key=lambda x: x["first_detected_frame"]
+            )
+            good_sign_board_list = sorted(
+                good_sign_board_list, key=lambda x: x["first_detected_frame"]
             )
 
             frames_with_detections = len(results_log["frames"])
@@ -432,11 +490,22 @@ class PotSignDetector:
                     "low_confidence_min_frames": LOW_CONFIDENCE_MIN_FRAMES,
                     "min_distance_threshold": MIN_DISTANCE_THRESHOLD,
                     "tracker": TRACKER,
+                    "road_damage_classes": sorted(list(ROAD_DAMAGE_CLASSES)),
+                    "excluded_classes": sorted(list(EXCLUDED_CLASSES)),
                 },
                 "summary": {
                     "total_frames": frame_count,
-                    "unique_potholes": len(counted_potholes),
-                    "unique_signboards": len(counted_signboards),
+                    "unique_defected_sign_board": len(counted_defected_sign_board),
+                    "unique_pothole": len(counted_pothole),
+                    "unique_road_crack": len(counted_road_crack),
+                    "unique_damaged_road_marking": len(counted_damaged_road_marking),
+                    "unique_good_sign_board": len(counted_good_sign_board),
+                    "total_road_damage": (
+                        len(counted_defected_sign_board)
+                        + len(counted_pothole)
+                        + len(counted_road_crack)
+                        + len(counted_damaged_road_marking)
+                    ),
                     "total_detections": total_detections,
                     "frames_with_detections": frames_with_detections,
                     "detection_rate": detection_rate,
@@ -447,8 +516,11 @@ class PotSignDetector:
                     "class_mismatch": rejection_stats["class_mismatch"],
                     "roi_outside": rejection_stats["roi_outside"],
                 },
+                "defected_sign_board_list": defected_sign_board_list,
                 "pothole_list": pothole_list,
-                "signboard_list": signboard_list,
+                "road_crack_list": road_crack_list,
+                "damaged_road_marking_list": damaged_road_marking_list,
+                "good_sign_board_list": good_sign_board_list,
                 "frames": results_log["frames"],
             }
 
@@ -460,82 +532,95 @@ class PotSignDetector:
             # === Save detections to database ===
             try:
                 db = SessionLocal()
-                saved_potholes = 0
-                saved_signboards = 0
+                saved_counts = {
+                    "defected_sign_board": 0,
+                    "pothole": 0,
+                    "road_crack": 0,
+                    "damaged_road_marking": 0,
+                    "good_sign_board": 0,
+                }
+
+                # Helper function to save a detection
+                def save_detection(detection, class_name):
+                    lat = detection.get("lat")
+                    lng = detection.get("lng")
+
+                    # Map GPS to location hierarchy
+                    project_id = None
+                    package_id = None
+                    location_id = None
+
+                    if lat and lng:
+                        location = find_location_by_gps(db, lat, lng)
+                        if location:
+                            location_id = location.id
+                            package_id = location.package_id
+                            if location.package:
+                                project_id = location.package.project_id
+
+                    crud.create_detection(
+                        db=db,
+                        video_id=video_id,
+                        frame_number=detection["first_detected_frame"],
+                        timestamp_ms=int(detection["first_detected_time"] * 1000),
+                        confidence=detection["confidence"],
+                        detection_type=class_name,
+                        class_name=class_name,
+                        bounding_box=detection.get("bbox", {}),
+                        latitude=lat,
+                        longitude=lng,
+                        project_id=project_id,
+                        package_id=package_id,
+                        location_id=location_id,
+                    )
+
+                # Save defected sign boards
+                for detection in defected_sign_board_list:
+                    save_detection(detection, "defected_sign_board")
+                    saved_counts["defected_sign_board"] += 1
 
                 # Save potholes
-                for pothole in pothole_list:
-                    lat = pothole.get("lat")
-                    lng = pothole.get("lng")
+                for detection in pothole_list:
+                    save_detection(detection, "pothole")
+                    saved_counts["pothole"] += 1
 
-                    # Map GPS to location hierarchy
-                    project_id = None
-                    package_id = None
-                    location_id = None
+                # Save road cracks
+                for detection in road_crack_list:
+                    save_detection(detection, "road_crack")
+                    saved_counts["road_crack"] += 1
 
-                    if lat and lng:
-                        location = find_location_by_gps(db, lat, lng)
-                        if location:
-                            location_id = location.id
-                            package_id = location.package_id
-                            if location.package:
-                                project_id = location.package.project_id
+                # Save damaged road markings
+                for detection in damaged_road_marking_list:
+                    save_detection(detection, "damaged_road_marking")
+                    saved_counts["damaged_road_marking"] += 1
 
-                    crud.create_detection(
-                        db=db,
-                        video_id=video_id,
-                        frame_number=pothole["first_detected_frame"],
-                        timestamp_ms=int(pothole["first_detected_time"] * 1000),
-                        confidence=pothole["confidence"],
-                        detection_type="pothole",
-                        class_name="pothole",
-                        bounding_box=pothole.get("bbox", {}),
-                        latitude=lat,
-                        longitude=lng,
-                        project_id=project_id,
-                        package_id=package_id,
-                        location_id=location_id,
-                    )
-                    saved_potholes += 1
-
-                # Save signboards
-                for signboard in signboard_list:
-                    lat = signboard.get("lat")
-                    lng = signboard.get("lng")
-
-                    # Map GPS to location hierarchy
-                    project_id = None
-                    package_id = None
-                    location_id = None
-
-                    if lat and lng:
-                        location = find_location_by_gps(db, lat, lng)
-                        if location:
-                            location_id = location.id
-                            package_id = location.package_id
-                            if location.package:
-                                project_id = location.package.project_id
-
-                    crud.create_detection(
-                        db=db,
-                        video_id=video_id,
-                        frame_number=signboard["first_detected_frame"],
-                        timestamp_ms=int(signboard["first_detected_time"] * 1000),
-                        confidence=signboard["confidence"],
-                        detection_type="signboard",
-                        class_name=signboard["type"],
-                        bounding_box=signboard.get("bbox", {}),
-                        latitude=lat,
-                        longitude=lng,
-                        project_id=project_id,
-                        package_id=package_id,
-                        location_id=location_id,
-                    )
-                    saved_signboards += 1
+                # Save good sign boards
+                for detection in good_sign_board_list:
+                    save_detection(detection, "good_sign_board")
+                    saved_counts["good_sign_board"] += 1
 
                 db.commit()
+
+                total_road_damage_saved = (
+                    saved_counts["defected_sign_board"]
+                    + saved_counts["pothole"]
+                    + saved_counts["road_crack"]
+                    + saved_counts["damaged_road_marking"]
+                )
+
                 logger.info(
-                    f"Saved {saved_potholes} pothole and {saved_signboards} signboard detections to database for {video_id}"
+                    f"Saved {total_road_damage_saved} road damage detections to database for {video_id}"
+                )
+                logger.info(
+                    f"  - Defected sign boards: {saved_counts['defected_sign_board']}"
+                )
+                logger.info(f"  - Potholes: {saved_counts['pothole']}")
+                logger.info(f"  - Road cracks: {saved_counts['road_crack']}")
+                logger.info(
+                    f"  - Damaged road markings: {saved_counts['damaged_road_marking']}"
+                )
+                logger.info(
+                    f"  - Good sign boards (info): {saved_counts['good_sign_board']}"
                 )
 
             except Exception as db_error:
@@ -560,24 +645,42 @@ class PotSignDetector:
 
             # Detailed logging
             logger.info("=" * 60)
-            logger.info(f"COMBINED POT-SIGN DETECTION COMPLETE: {video_id}")
+            logger.info(f"5-CLASS ROAD DAMAGE DETECTION COMPLETE: {video_id}")
             logger.info(f"Total frames: {frame_count}")
             logger.info(f"Total detections: {total_detections}")
-            logger.info(f">>> UNIQUE POTHOLES: {len(counted_potholes)} <<<")
-            logger.info(f">>> UNIQUE SIGNBOARDS: {len(counted_signboards)} <<<")
+            logger.info("=== ROAD DAMAGE DETECTIONS ===")
+            logger.info(f"  Defected Sign Boards: {len(counted_defected_sign_board)}")
+            logger.info(f"  Potholes: {len(counted_pothole)}")
+            logger.info(f"  Road Cracks: {len(counted_road_crack)}")
+            logger.info(f"  Damaged Road Markings: {len(counted_damaged_road_marking)}")
+            logger.info(
+                f">>> TOTAL ROAD DAMAGE: {len(counted_defected_sign_board) + len(counted_pothole) + len(counted_road_crack) + len(counted_damaged_road_marking)} <<<"
+            )
+            logger.info("=== OTHER DETECTIONS ===")
+            logger.info(
+                f"  Good Sign Boards (info only): {len(counted_good_sign_board)}"
+            )
             logger.info(
                 f"Class mismatches rejected: {rejection_stats['class_mismatch']}"
             )
             logger.info("=" * 60)
 
             print(f"\n{'='*60}")
-            print(f"COMBINED POT-SIGN DETECTION COMPLETE")
+            print(f"5-CLASS ROAD DAMAGE DETECTION COMPLETE")
             print(f"{'='*60}")
             print(f"Video ID: {video_id}")
             print(f"Frames: {frame_count} | Device: {DEVICE}")
             print(f"Total detections: {total_detections}")
-            print(f">>> UNIQUE POTHOLES: {len(counted_potholes)} <<<")
-            print(f">>> UNIQUE SIGNBOARDS: {len(counted_signboards)} <<<")
+            print("=== ROAD DAMAGE DETECTIONS ===")
+            print(f"  Defected Sign Boards: {len(counted_defected_sign_board)}")
+            print(f"  Potholes: {len(counted_pothole)}")
+            print(f"  Road Cracks: {len(counted_road_crack)}")
+            print(f"  Damaged Road Markings: {len(counted_damaged_road_marking)}")
+            print(
+                f">>> TOTAL ROAD DAMAGE: {len(counted_defected_sign_board) + len(counted_pothole) + len(counted_road_crack) + len(counted_damaged_road_marking)} <<<"
+            )
+            print("=== OTHER DETECTIONS ===")
+            print(f"  Good Sign Boards (info only): {len(counted_good_sign_board)}")
             print(
                 f"Class mismatches (ID switching): {rejection_stats['class_mismatch']}"
             )

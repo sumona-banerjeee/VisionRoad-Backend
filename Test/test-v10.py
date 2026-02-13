@@ -313,50 +313,6 @@ def is_duplicate_location(cx, cy, class_name, current_time):
 
     return False, None
 
-
-def preprocess_frame(frame):
-    """
-    Preprocess frame to handle lighting variations and improve detection consistency.
-    Applies CLAHE, denoising, and optional sharpening based on config flags.
-    """
-    processed = frame.copy()
-
-    # 1. CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    if ENABLE_CLAHE:
-        # Convert to LAB color space (separates luminance from color)
-        lab = cv2.cvtColor(processed, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-
-        # Apply CLAHE to L-channel (luminance) only
-        clahe = cv2.createCLAHE(
-            clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_GRID_SIZE
-        )
-        l = clahe.apply(l)
-
-        # Merge channels and convert back to BGR
-        lab = cv2.merge([l, a, b])
-        processed = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-
-    # 2. Denoising (reduces noise while preserving edges)
-    if ENABLE_DENOISE:
-        processed = cv2.fastNlMeansDenoisingColored(
-            processed,
-            None,
-            h=DENOISE_H,
-            hColor=DENOISE_H,
-            templateWindowSize=DENOISE_TEMPLATE_WINDOW,
-            searchWindowSize=DENOISE_SEARCH_WINDOW,
-        )
-
-    # 3. Sharpening (optional - enhances edges but may amplify noise)
-    if ENABLE_SHARPEN:
-        # Create sharpening kernel
-        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
-        processed = cv2.filter2D(processed, -1, kernel)
-
-    return processed
-
-
 # ===================== PROCESSING =====================
 if IS_IMAGE:
     print("Processing image...")
@@ -388,12 +344,9 @@ while processing:
     frame_id += 1
     current_time = frame_id / fps
 
-    # Apply preprocessing to handle lighting variations
-    # preprocessed_frame = preprocess_frame(current_frame)
-
     # Run detection on preprocessed frame
     results = model.track(
-        current_frame,  # preprocessed_frame
+        current_frame, 
         persist=True,
         conf=CONF_THRESHOLD,
         tracker=TRACKER,

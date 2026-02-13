@@ -24,7 +24,7 @@ from app.models.processing import ProcessingStatusEnum
 logger = logging.getLogger(__name__)
 
 # Configuration
-MODEL_PATH = "models/pothole-signboard.pt"
+MODEL_PATH = "models/final-v1.pt"
 TRACKER = "botsort.yaml"  # Using BoT-SORT for better tracking consistency
 CONF_THRESHOLD = 0.50  
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"

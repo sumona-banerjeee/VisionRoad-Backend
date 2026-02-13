@@ -1,0 +1,5 @@
+- defected_sign_board
+- good_sign_board
+- pothole
+- road_crack
+- damaged_road_marking

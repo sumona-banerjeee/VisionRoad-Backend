@@ -160,6 +160,7 @@ class SignBoardDetector:
                             "signboard_id": track_id,
                             "type": class_name,
                             "confidence": round(float(conf), 3),
+                            "signboard_count":len(confirmed),  # new key
                             "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                             "center": {"x": cx, "y": cy},
                             "area": area,

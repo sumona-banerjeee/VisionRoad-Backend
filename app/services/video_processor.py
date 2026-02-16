@@ -168,6 +168,7 @@ class VideoProcessor:
                                 "pothole_id": track_id,
                                 "type": "pothole",
                                 "confidence": round(float(conf), 3),
+                                "pothole_count":len(confirmed),  # new key
                                 "bbox": {
                                     "x1": x1,
                                     "y1": y1_full,

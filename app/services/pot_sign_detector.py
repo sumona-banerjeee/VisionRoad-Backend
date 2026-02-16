@@ -366,6 +366,13 @@ class PotSignDetector:
                                     "detection_id": tid,
                                     "type": class_name,
                                     "confidence": round(float(conf), 3),
+                                    "count":{
+                                        "defected_sign_board":len(counted_defected_sign_board),
+                                        "pothole":len(counted_pothole),
+                                        "road_crack":len(counted_road_crack),
+                                        "damaged_road_marking":len(counted_damaged_road_marking),
+                                        "good_sign_board":len(counted_good_sign_board),
+                                    },
                                     "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                                     "center": {"x": center_x, "y": center_y},
                                     "area": area,

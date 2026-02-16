@@ -10,105 +10,50 @@ import torch
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, deque
-from fastapi import HTTPException
-from ultralytics import YOLO
-from concurrent.futures import ThreadPoolExecutor
 
-from app.ws.websocket_manager import manager
+from app.services.base_detector import BaseDetector
 from app.core.storage import processing_status, detection_results, RESULTS_DIR
 from app.db.database import SessionLocal
 from app.db import crud
+from app.models.detection import Detection
 from app.services.location_mapper import find_location_by_gps
-from app.models.processing import ProcessingStatusEnum
+from app.ws.websocket_manager import manager
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 TRACKER = "bytetrack.yaml"
 CONFIDENCE_THRESHOLD = 0.6
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 MODEL_PATH = "models/best-board-v2.pt"
 
-# ROI Configuration
-# Top 10% to 70% of frame height
+# ROI Configuration (Ratios)
 ROI_TOP_RATIO = 0.10
 ROI_BOTTOM_RATIO = 0.70
 ROI_LEFT_RATIO = 0.0
 ROI_RIGHT_RATIO = 1.0
 
-# Thread pool for blocking operations
-executor = ThreadPoolExecutor(max_workers=4)
-
-
-class SignBoardDetector:
+class SignBoardDetector(BaseDetector):
     def __init__(self):
-        """Initialize sign board detector with YOLO model on GPU"""
-        try:
-            logger.info(f"Loading sign board model on device: {DEVICE}")
-            self.model = YOLO(MODEL_PATH)
+        """Initialize sign board detector with YOLO model"""
+        super().__init__(model_path=MODEL_PATH)
 
-            if DEVICE == "cuda:0":
-                self.model.to(DEVICE)
-                logger.info(
-                    f"Sign board model loaded on GPU: {torch.cuda.get_device_name(0)}"
-                )
-            else:
-                logger.info("Sign board model loaded on CPU")
-
-            # Warmup
-            self._warmup()
-            logger.info("Sign board detector ready")
-
-        except Exception as e:
-            logger.error(f"Failed to load sign board model: {e}")
-            raise
-
-    def _warmup(self):
-        """Warmup model for optimal performance"""
-        try:
-            import numpy as np
-
-            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-            self.model.predict(dummy, verbose=False, device=DEVICE)
-        except:
-            pass
-
-    @staticmethod
-    def find_nearest_gps(detection_time: float, gps_points: list) -> dict:
-        """Find the nearest GPS coordinates for a given timestamp"""
-        if not gps_points:
-            return {"lat": None, "lng": None}
-
-        # Find the GPS point with the closest timestamp
-        nearest_point = min(
-            gps_points, key=lambda p: abs(p.get("timestamp", 0) - detection_time)
-        )
-        return {"lat": nearest_point.get("lat"), "lng": nearest_point.get("lng")}
-
-    # === Main detection function for a single frame ===
-    def detect_frame(
-        self, frame, frame_id, results_log, tracker, confirmed, current_time, fps
-    ):
+    def detect_frame(self, frame, frame_id, results_log, tracker, confirmed, current_time, fps):
         """Detect sign boards in a single frame with tracking"""
         h, w = frame.shape[:2]
 
-        # Calculate ROI
         roi_left = int(w * ROI_LEFT_RATIO)
         roi_right = int(w * ROI_RIGHT_RATIO)
         roi_top = int(h * ROI_TOP_RATIO)
         roi_bottom = int(h * ROI_BOTTOM_RATIO)
 
-        detections = []
+        detections_in_frame = []
 
         try:
             results = self.model.track(
                 frame,
                 persist=True,
                 conf=CONFIDENCE_THRESHOLD,
-                # tracker=TRACKER, # affect detection
-                # verbose=False,
-                device=DEVICE,  # use GPU if available
-                # imgsz=640,
+                device=self.device,
             )
 
             for r in results:
@@ -126,20 +71,13 @@ class SignBoardDetector:
                 for box, track_id, conf, class_id in zip(boxes, ids, confs, class_ids):
                     x1, y1, x2, y2 = map(int, box)
                     track_id = int(track_id)
+                    cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-                    # Calculate center
-                    cx = int((x1 + x2) / 2)
-                    cy = int((y1 + y2) / 2)
-
-                    # Check if detection is in ROI
-                    in_roi = roi_left < cx < roi_right and roi_top < cy < roi_bottom
-                    if not in_roi:
+                    if not (roi_left < cx < roi_right and roi_top < cy < roi_bottom):
                         continue
 
-                    # Get class name
                     class_name = str(self.model.names[class_id])
 
-                    # Track first detection
                     if track_id not in confirmed:
                         confirmed[track_id] = {
                             "signboard_id": track_id,
@@ -151,56 +89,33 @@ class SignBoardDetector:
                             "center": {"x": cx, "y": cy},
                         }
 
-                    # Calculate area
-                    area = (x2 - x1) * (y2 - y1)
+                    detections_in_frame.append({
+                        "frame_id": frame_id,
+                        "signboard_id": track_id,
+                        "type": class_name,
+                        "confidence": round(float(conf), 3),
+                        "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                        "center": {"x": cx, "y": cy},
+                        "area": (x2 - x1) * (y2 - y1),
+                    })
 
-                    detections.append(
-                        {
-                            "frame_id": frame_id,
-                            "signboard_id": track_id,
-                            "type": class_name,
-                            "confidence": round(float(conf), 3),
-                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                            "center": {"x": cx, "y": cy},
-                            "area": area,
-                        }
-                    )
-
-            if detections:
-                results_log["frames"].append(
-                    {"frame_id": frame_id, "signboards": detections}
-                )
+            if detections_in_frame:
+                results_log["frames"].append({"frame_id": frame_id, "signboards": detections_in_frame})
 
         except Exception as e:
             logger.error(f"Sign board detection error: {e}")
 
-        return len(detections)
+        return len(detections_in_frame)
 
-    def _process_video_blocking(
-        self, video_id: str, video_path: str, json_path: str, speed: int, loop
-    ):
-        """Process video in blocking thread"""
+    def _process_video_blocking(self, video_id: str, video_path: str, json_path: str, speed: int, loop):
+        cap = None
         try:
             asyncio.run_coroutine_threadsafe(
-                manager.send_message(
-                    video_id, {"type": "status", "status": "processing", "progress": 0}
-                ),
+                manager.send_message(video_id, {"type": "status", "status": "processing", "progress": 0}),
                 loop,
             )
 
-            # Load GPS data from JSON file
-            gps_points = []
-            if json_path and Path(json_path).exists():
-                try:
-                    with open(json_path, "r") as f:
-                        gps_data = json.load(f)
-                        gps_points = gps_data.get("gpsPoints", [])
-                        logger.info(
-                            f"Loaded {len(gps_points)} GPS points from {json_path}"
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to load GPS data: {e}")
-
+            gps_points = self._load_gps_data(json_path)
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 raise Exception("Could not open video")
@@ -210,14 +125,12 @@ class SignBoardDetector:
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            logger.info(
-                f"Processing sign board detection for {video_id}: {total_frames} frames @ {fps:.1f} FPS"
-            )
+            logger.info(f"Processing sign board detection for {video_id}: {total_frames} frames @ {fps:.1f} FPS")
 
             results_log = {"frames": []}
             tracker = defaultdict(lambda: deque(maxlen=20))
             confirmed = {}
-            total_detections = 0
+            total_detections_count = 0
             frame_count = 0
             last_progress = 0
 
@@ -229,39 +142,18 @@ class SignBoardDetector:
                 frame_count += 1
                 current_time = frame_count / fps
 
-                n = self.detect_frame(
-                    frame,
-                    frame_count,
-                    results_log,
-                    tracker,
-                    confirmed,
-                    current_time,
-                    fps,
-                )
-                total_detections += n
+                n = self.detect_frame(frame, frame_count, results_log, tracker, confirmed, current_time, fps)
+                total_detections_count += n
 
-                # Progress update every 5%
                 progress = int((frame_count / total_frames) * 100)
                 if progress - last_progress >= 5:
-                    processing_status[video_id]["progress"] = progress
-                    asyncio.run_coroutine_threadsafe(
-                        manager.send_message(
-                            video_id,
-                            {
-                                "type": "progress",
-                                "progress": progress,
-                                "unique_signboards": len(confirmed),
-                                "total_detections": total_detections,
-                            },
-                        ),
-                        loop,
-                    )
+                    self._send_progress(video_id, progress, loop, {
+                        "unique_signboards": len(confirmed),
+                        "total_detections": total_detections_count,
+                    })
                     last_progress = progress
 
-            cap.release()
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-            # Build results with GPS coordinates
+            # Build results
             signboard_list = []
             for info in confirmed.values():
                 signboard_data = {
@@ -272,28 +164,15 @@ class SignBoardDetector:
                     "confidence": info["confidence"],
                     "bbox": info.get("bbox", {}),
                 }
-
-                # Add GPS coordinates if available
                 if gps_points:
-                    gps_coords = self.find_nearest_gps(
-                        info["first_detected_time"], gps_points
-                    )
+                    gps_coords = self.find_nearest_gps(info["first_detected_time"], gps_points)
                     signboard_data["lat"] = gps_coords["lat"]
                     signboard_data["lng"] = gps_coords["lng"]
-
                 signboard_list.append(signboard_data)
 
-            # Sort by first detected frame
-            signboard_list = sorted(
-                signboard_list, key=lambda x: x["first_detected_frame"]
-            )
-
+            signboard_list = sorted(signboard_list, key=lambda x: x["first_detected_frame"])
             frames_with_detections = len(results_log["frames"])
-            detection_rate = (
-                round((frames_with_detections / frame_count) * 100, 2)
-                if frame_count > 0
-                else 0
-            )
+            detection_rate = round((frames_with_detections / frame_count) * 100, 2) if frame_count > 0 else 0
 
             results = {
                 "video_id": video_id,
@@ -311,7 +190,7 @@ class SignBoardDetector:
                 "summary": {
                     "total_frames": frame_count,
                     "unique_signboards": len(confirmed),
-                    "total_detections": total_detections,
+                    "total_detections": total_detections_count,
                     "frames_with_detections": frames_with_detections,
                     "detection_rate": detection_rate,
                 },
@@ -320,93 +199,16 @@ class SignBoardDetector:
             }
 
             detection_results[video_id] = results
-
             with open(RESULTS_DIR / f"{video_id}.json", "w") as f:
                 json.dump(results, f, indent=2)
 
-            # === Save detections to database ===
-            try:
-                db = SessionLocal()
-                saved_count = 0
-
-                for signboard in signboard_list:
-                    lat = signboard.get("lat")
-                    lng = signboard.get("lng")
-
-                    # Map GPS to location hierarchy
-                    project_id = None
-                    package_id = None
-                    location_id = None
-
-                    if lat and lng:
-                        location = find_location_by_gps(db, lat, lng)
-                        if location:
-                            location_id = location.id
-                            package_id = location.package_id
-                            # Get project_id from package
-                            if location.package:
-                                project_id = location.package.project_id
-
-                    # Save detection to database
-                    crud.create_detection(
-                        db=db,
-                        video_id=video_id,
-                        frame_number=signboard["first_detected_frame"],
-                        timestamp_ms=int(signboard["first_detected_time"] * 1000),
-                        confidence=signboard["confidence"],
-                        detection_type="signboard",
-                        class_name=signboard["type"],
-                        bounding_box=signboard.get("bbox", {}),
-                        latitude=lat,
-                        longitude=lng,
-                        project_id=project_id,
-                        package_id=package_id,
-                        location_id=location_id,
-                    )
-                    saved_count += 1
-
-                db.commit()
-                logger.info(
-                    f"Saved {saved_count} signboard detections to database for {video_id}"
-                )
-
-            except Exception as db_error:
-                logger.error(f"Database save error: {db_error}")
-            finally:
-                db.close()
+            self._save_to_db(video_id, signboard_list)
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
-
             asyncio.run_coroutine_threadsafe(
-                manager.send_message(
-                    video_id,
-                    {
-                        "type": "complete",
-                        "status": "completed",
-                        "summary": results["summary"],
-                    },
-                ),
+                manager.send_message(video_id, {"type": "complete", "status": "completed", "summary": results["summary"]}),
                 loop,
             )
-
-            # Detailed logging
-            unique_ids = sorted([s["signboard_id"] for s in signboard_list])
-            logger.info("=" * 60)
-            logger.info(f"SIGN BOARD DETECTION COMPLETE: {video_id}")
-            logger.info(f"Total frames: {frame_count}")
-            logger.info(f"Total detections: {total_detections}")
-            logger.info(f">>> UNIQUE SIGNBOARDS: {len(confirmed)} <<<")
-            logger.info(f"Signboard IDs: {unique_ids}")
-            logger.info("=" * 60)
-            print(f"\n{'='*60}")
-            print(f"SIGN BOARD DETECTION COMPLETE")
-            print(f"{'='*60}")
-            print(f"Video ID: {video_id}")
-            print(f"Frames: {frame_count} | Device: {DEVICE}")
-            print(f"Total detections: {total_detections}")
-            print(f">>> UNIQUE SIGNBOARDS: {len(confirmed)} <<<")
-            print(f"Signboard IDs: {unique_ids}")
-            print(f"{'='*60}\n")
             return results
 
         except Exception as e:
@@ -417,36 +219,48 @@ class SignBoardDetector:
                 loop,
             )
             raise
+        finally:
+            if cap:
+                cap.release()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-    async def process_video(
-        self, video_id: str, video_path: str, json_path: str, speed_kmh: int
-    ):
-        """Async video processing"""
-        processing_status[video_id] = {"status": "processing", "progress": 0}
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            executor,
-            self._process_video_blocking,
-            video_id,
-            video_path,
-            json_path,
-            speed_kmh,
-            loop,
-        )
+    def _save_to_db(self, video_id, signboard_list):
+        db = SessionLocal()
+        try:
+            db_detections = []
+            for signboard in signboard_list:
+                lat = signboard.get("lat")
+                lng = signboard.get("lng")
+                project_id, package_id, location_id = None, None, None
 
-    async def get_status(self, video_id: str):
-        """Get processing status"""
-        if video_id not in processing_status:
-            raise HTTPException(status_code=404, detail="Video ID not found")
-        return processing_status[video_id]
+                if lat and lng:
+                    location = find_location_by_gps(db, lat, lng)
+                    if location:
+                        location_id = location.id
+                        package_id = location.package_id
+                        if location.package:
+                            project_id = location.package.project_id
 
-    async def get_results(self, video_id: str):
-        """Get detection results"""
-        if video_id not in detection_results:
-            result_file = RESULTS_DIR / f"{video_id}.json"
-            if result_file.exists():
-                with open(result_file, "r") as f:
-                    detection_results[video_id] = json.load(f)
-            else:
-                raise HTTPException(status_code=404, detail="Results not found")
-        return detection_results[video_id]
+                det = Detection(
+                    video_id=video_id,
+                    frame_number=signboard["first_detected_frame"],
+                    timestamp_ms=int(signboard["first_detected_time"] * 1000),
+                    confidence=signboard["confidence"],
+                    detection_type="signboard",
+                    class_name=signboard["type"],
+                    latitude=lat,
+                    longitude=lng,
+                    project_id=project_id,
+                    package_id=package_id,
+                    location_id=location_id,
+                )
+                det.set_bounding_box(signboard.get("bbox", {}))
+                db_detections.append(det)
+
+            if db_detections:
+                crud.create_detections_bulk(db, db_detections)
+                logger.info(f"Saved {len(db_detections)} signboard detections to database for {video_id}")
+        except Exception as e:
+            logger.error(f"Database save error: {e}")
+        finally:
+            db.close()

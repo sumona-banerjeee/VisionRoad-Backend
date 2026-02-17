@@ -381,10 +381,9 @@ class PotSignDetector(BaseDetector):
                                 # VL Verification (only for new detections, cached by tid)
                                 vl_result = None
                                 vl_verified = False
-                                vl_confidence = None
-                                vl_category = None
-
-                                if self.vl_client and ENABLE_VL_VERIFICATION:
+                                # VL Verification Layer (if enabled)
+                                vl_verified = False
+                                if self.api_keys and ENABLE_VL_VERIFICATION:
                                     # Check cache first
                                     if tid in vl_cache:
                                         vl_result = vl_cache[tid]

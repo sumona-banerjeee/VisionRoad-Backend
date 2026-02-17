@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # Processing
     DEFAULT_SPEED_KMH: int = 30
 
+    # VL Verification
+    OLLAMA_API_KEY: str | None = None
+    ENABLE_VL_VERIFICATION: bool = True
+
     class Config:
         env_file = ".env"
         case_sensitive = True

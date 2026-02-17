@@ -351,23 +351,29 @@ class PotSignDetector(BaseDetector):
 
                                     # Process VL result
                                     if vl_result:
-                                        vl_verified = vl_result.get(
+                                        vl_category = vl_result.get("category")
+                                        vl_confidence = vl_result.get("confidence")
+                                        belongs_to_category = vl_result.get(
                                             "belongs_to_category", False
                                         )
-                                        vl_confidence = vl_result.get("confidence")
-                                        vl_category = vl_result.get("category")
 
-                                        # Only accept if VL confirms the detection
-                                        if not vl_verified:
+                                        # Only accept if VL category MATCHES YOLO prediction exactly
+                                        # Reject if: category is null, doesn't match, or belongs is False
+                                        if (
+                                            vl_category == class_name
+                                            and belongs_to_category
+                                        ):
+                                            vl_verified = True
+                                            vl_stats["verified_success"] += 1
+                                        else:
+                                            vl_verified = False
                                             rejection_stats["vl_mismatch"] += 1
                                             vl_stats["verified_failed"] += 1
                                             logger.info(
                                                 f"VL rejected detection tid={tid}: YOLO={class_name}, "
-                                                f"VL={vl_category} (conf={vl_confidence})"
+                                                f"VL={vl_category} (conf={vl_confidence}, belongs={belongs_to_category})"
                                             )
                                             continue  # Skip this detection
-                                        else:
-                                            vl_stats["verified_success"] += 1
                                     else:
                                         # VL failed or was skipped, use fallback (accept YOLO prediction)
                                         if self.vl_client and ENABLE_VL_VERIFICATION:

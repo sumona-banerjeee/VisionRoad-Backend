@@ -49,22 +49,42 @@ VL_IMAGE_MAX_SIZE = 512  # Max dimension for VL input images
 VL_MIN_BBOX_SIZE = 30  # Skip VL for bboxes smaller than this
 
 
-def setup_ollama_client():
-    """Configure Ollama client with API key from environment"""
-    api_key = os.getenv("OLLAMA_API_KEY")
+def load_api_keys():
+    """Load all available API keys from environment variables"""
+    api_keys = []
+    i = 1
 
-    if not api_key:
-        logger.warning("OLLAMA_API_KEY not set. VL verification will be disabled.")
-        return None
+    # Try to load numbered API keys (OLLAMA_API_KEY_1, OLLAMA_API_KEY_2, etc.)
+    while True:
+        key = os.getenv(f"OLLAMA_API_KEY_{i}")
+        if not key:
+            break
+        api_keys.append(key)
+        i += 1
 
+    # Fallback to single key if numbered keys not found
+    if not api_keys:
+        single_key = os.getenv("OLLAMA_API_KEY")
+        if single_key:
+            api_keys.append(single_key)
+
+    if api_keys:
+        logger.info(f"Loaded {len(api_keys)} API key(s) for VL verification")
+    else:
+        logger.warning("No API keys found. VL verification will be disabled.")
+
+    return api_keys
+
+
+def create_ollama_client(api_key):
+    """Create Ollama client with given API key"""
     try:
         client = ollama.Client(
             host="https://ollama.com", headers={"Authorization": f"Bearer {api_key}"}
         )
-        logger.info("Ollama VL client initialized successfully")
         return client
     except Exception as e:
-        logger.error(f"Failed to initialize Ollama client: {e}")
+        logger.error(f"Failed to create Ollama client: {e}")
         return None
 
 
@@ -72,9 +92,29 @@ class PotSignDetector(BaseDetector):
     def __init__(self):
         """Initialize combined pot-sign detector with YOLO model"""
         super().__init__(model_path=MODEL_PATH)
-        self.vl_client = None
+
+        # Load multiple API keys for rotation
+        self.api_keys = []
+        self.current_key_index = 0
+        self.key_lock = None  # Thread-safe rotation
+
         if ENABLE_VL_VERIFICATION:
-            self.vl_client = setup_ollama_client()
+            self.api_keys = load_api_keys()
+            if self.api_keys:
+                # Import threading only if we have keys
+                import threading
+
+                self.key_lock = threading.Lock()
+
+    def get_next_api_key(self):
+        """Get next API key in rotation (thread-safe)"""
+        if not self.api_keys:
+            return None
+
+        with self.key_lock:
+            key = self.api_keys[self.current_key_index]
+            self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+            return key
 
     @staticmethod
     def calculate_distance(p1, p2):
@@ -121,7 +161,7 @@ class PotSignDetector(BaseDetector):
         Returns:
             dict with verification results or None if verification fails/skipped
         """
-        if not self.vl_client or not ENABLE_VL_VERIFICATION:
+        if not self.api_keys or not ENABLE_VL_VERIFICATION:
             return None
 
         x1, y1, x2, y2 = bbox
@@ -134,6 +174,11 @@ class PotSignDetector(BaseDetector):
             return None
 
         try:
+            # Get next API key in rotation
+            api_key = self.get_next_api_key()
+            if not api_key:
+                return None
+
             # Crop detection region
             cropped = frame[y1:y2, x1:x2]
 
@@ -157,8 +202,13 @@ class PotSignDetector(BaseDetector):
                 '"belongs_to_category": true/false}'
             )
 
+            # Create client with rotated API key
+            vl_client = create_ollama_client(api_key)
+            if not vl_client:
+                return None
+
             # Call VL model
-            response = self.vl_client.chat(
+            response = vl_client.chat(
                 model=VL_MODEL,
                 format="json",
                 messages=[
@@ -376,7 +426,7 @@ class PotSignDetector(BaseDetector):
                                             continue  # Skip this detection
                                     else:
                                         # VL failed or was skipped, use fallback (accept YOLO prediction)
-                                        if self.vl_client and ENABLE_VL_VERIFICATION:
+                                        if self.api_keys and ENABLE_VL_VERIFICATION:
                                             rejection_stats["vl_errors"] += 1
                                         vl_verified = True  # Fallback: trust YOLO
                                 else:

@@ -7,12 +7,11 @@ import json
 import asyncio
 import logging
 import torch
-from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, deque
 
 from app.services.base_detector import BaseDetector
-from app.core.storage import processing_status, detection_results, RESULTS_DIR
+from app.core.config import processing_status, detection_results, RESULTS_DIR
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
@@ -27,6 +26,7 @@ TRACKER = "bytetrack.yaml"
 MIN_DETECTION_FRAMES = 3
 DETECTION_TIME_WINDOW = 1.0
 CONFIDENCE_THRESHOLD = 0.80
+
 
 class VideoProcessor(BaseDetector):
     def __init__(self):
@@ -43,7 +43,9 @@ class VideoProcessor(BaseDetector):
         else:
             return {"roi_ratio": 0.75, "conf": 0.22}
 
-    def detect_frame(self, frame, frame_id, results_log, tracker, confirmed, current_time, speed):
+    def detect_frame(
+        self, frame, frame_id, results_log, tracker, confirmed, current_time, speed
+    ):
         """Detect potholes in a single frame with tracking"""
         h, w = frame.shape[:2]
         params = self.get_adaptive_params(speed)
@@ -85,9 +87,16 @@ class VideoProcessor(BaseDetector):
                     y1_full, y2_full = y1 + roi_y, y2 + roi_y
                     tracker[track_id].append(current_time)
 
-                    recent = [t for t in tracker[track_id] if current_time - t <= DETECTION_TIME_WINDOW]
+                    recent = [
+                        t
+                        for t in tracker[track_id]
+                        if current_time - t <= DETECTION_TIME_WINDOW
+                    ]
 
-                    if len(recent) >= MIN_DETECTION_FRAMES and track_id not in confirmed:
+                    if (
+                        len(recent) >= MIN_DETECTION_FRAMES
+                        and track_id not in confirmed
+                    ):
                         confirmed[track_id] = {
                             "frame": frame_id,
                             "time": current_time,
@@ -102,34 +111,47 @@ class VideoProcessor(BaseDetector):
                         center_y = int((y1_full + y2_full) / 2)
                         area = (x2 - x1) * (y2_full - y1_full)
 
-                        detections_in_frame.append({
-                            "frame_id": frame_id,
-                            "pothole_id": track_id,
-                            "type": "pothole",
-                            "confidence": round(float(conf), 3),
-                            "bbox": {"x1": x1, "y1": y1_full, "x2": x2, "y2": y2_full},
-                            "center": {"x": center_x, "y": center_y},
-                            "area": area,
-                        })
+                        detections_in_frame.append(
+                            {
+                                "frame_id": frame_id,
+                                "pothole_id": track_id,
+                                "type": "pothole",
+                                "confidence": round(float(conf), 3),
+                                "bbox": {
+                                    "x1": x1,
+                                    "y1": y1_full,
+                                    "x2": x2,
+                                    "y2": y2_full,
+                                },
+                                "center": {"x": center_x, "y": center_y},
+                                "area": area,
+                            }
+                        )
 
             if detections_in_frame:
-                results_log["frames"].append({
-                    "frame_id": frame_id,
-                    "speed_kmh": speed,
-                    "roi_ratio": params["roi_ratio"],
-                    "potholes": detections_in_frame,
-                })
+                results_log["frames"].append(
+                    {
+                        "frame_id": frame_id,
+                        "speed_kmh": speed,
+                        "roi_ratio": params["roi_ratio"],
+                        "potholes": detections_in_frame,
+                    }
+                )
 
         except Exception as e:
             logger.error(f"Detection error: {e}")
 
         return count, new_confirmed
 
-    def _process_video_blocking(self, video_id: str, video_path: str, json_path: str, speed: int, loop):
+    def _process_video_blocking(
+        self, video_id: str, video_path: str, json_path: str, speed: int, loop
+    ):
         cap = None
         try:
             asyncio.run_coroutine_threadsafe(
-                manager.send_message(video_id, {"type": "status", "status": "processing", "progress": 0}),
+                manager.send_message(
+                    video_id, {"type": "status", "status": "processing", "progress": 0}
+                ),
                 loop,
             )
 
@@ -160,15 +182,28 @@ class VideoProcessor(BaseDetector):
                 frame_count += 1
                 current_time = frame_count / fps
 
-                n, _ = self.detect_frame(frame, frame_count, results_log, tracker, confirmed, current_time, speed)
+                n, _ = self.detect_frame(
+                    frame,
+                    frame_count,
+                    results_log,
+                    tracker,
+                    confirmed,
+                    current_time,
+                    speed,
+                )
                 total_detections_count += n
 
                 progress = int((frame_count / total_frames) * 100)
                 if progress - last_progress >= 5:
-                    self._send_progress(video_id, progress, loop, {
-                        "unique_potholes": len(confirmed),
-                        "total_detections": total_detections_count,
-                    })
+                    self._send_progress(
+                        video_id,
+                        progress,
+                        loop,
+                        {
+                            "unique_potholes": len(confirmed),
+                            "total_detections": total_detections_count,
+                        },
+                    )
                     last_progress = progress
 
             # Build results and save
@@ -189,7 +224,11 @@ class VideoProcessor(BaseDetector):
 
             pothole_list = sorted(pothole_list, key=lambda x: x["first_detected_frame"])
             frames_with_detections = len(results_log["frames"])
-            detection_rate = round((frames_with_detections / frame_count) * 100, 2) if frame_count > 0 else 0
+            detection_rate = (
+                round((frames_with_detections / frame_count) * 100, 2)
+                if frame_count > 0
+                else 0
+            )
 
             results = {
                 "video_id": video_id,
@@ -223,7 +262,14 @@ class VideoProcessor(BaseDetector):
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
             asyncio.run_coroutine_threadsafe(
-                manager.send_message(video_id, {"type": "complete", "status": "completed", "summary": results["summary"]}),
+                manager.send_message(
+                    video_id,
+                    {
+                        "type": "complete",
+                        "status": "completed",
+                        "summary": results["summary"],
+                    },
+                ),
                 loop,
             )
             return results
@@ -278,7 +324,9 @@ class VideoProcessor(BaseDetector):
 
             if db_detections:
                 crud.create_detections_bulk(db, db_detections)
-                logger.info(f"Saved {len(db_detections)} pothole detections to database for {video_id}")
+                logger.info(
+                    f"Saved {len(db_detections)} pothole detections to database for {video_id}"
+                )
         except Exception as e:
             logger.error(f"Database save error: {e}")
         finally:

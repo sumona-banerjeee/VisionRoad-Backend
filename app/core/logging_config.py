@@ -6,7 +6,6 @@ Configures both console and file logging with rotation
 import logging
 import logging.handlers
 from pathlib import Path
-from datetime import datetime
 
 # Create logs directory
 LOGS_DIR = Path("logs")

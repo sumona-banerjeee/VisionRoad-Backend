@@ -1,5 +1,3 @@
-# app/core/model_loader.py
-
 import torch
 import logging
 from ultralytics import YOLO

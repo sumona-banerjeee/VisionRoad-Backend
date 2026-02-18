@@ -1,5 +1,5 @@
-import os
 from pathlib import Path
+from typing import Dict
 from pydantic_settings import BaseSettings
 
 
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Processing
     DEFAULT_SPEED_KMH: int = 30
-    
+
     class Config:
         env_file = ".env"
         case_sensitive = True
@@ -34,3 +34,11 @@ settings = Settings()
 # Ensure directories exist
 settings.UPLOAD_DIR.mkdir(exist_ok=True)
 settings.RESULTS_DIR.mkdir(exist_ok=True)
+
+# Convenience aliases
+UPLOAD_DIR = settings.UPLOAD_DIR
+RESULTS_DIR = settings.RESULTS_DIR
+
+# In-memory storage for processing status and results
+processing_status: Dict[str, dict] = {}
+detection_results: Dict[str, dict] = {}

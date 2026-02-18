@@ -3,8 +3,6 @@
 from sqlalchemy.orm import Session
 from typing import Optional
 from app.models.location import Location
-from app.models.package import Package
-from app.models.project import Project
 
 
 def find_location_by_gps(

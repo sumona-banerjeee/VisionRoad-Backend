@@ -3,7 +3,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from typing import Dict, List, Any
 from app.db.database import get_db
 from app.models.detection import Detection
 from app.models.location import Location

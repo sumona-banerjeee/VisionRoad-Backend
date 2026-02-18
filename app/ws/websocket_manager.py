@@ -1,5 +1,3 @@
-# app/ws/websocket_manager.py
-
 from fastapi import WebSocket
 from typing import Dict
 import logging

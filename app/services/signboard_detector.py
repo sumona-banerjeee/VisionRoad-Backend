@@ -7,12 +7,11 @@ import json
 import asyncio
 import logging
 import torch
-from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, deque
 
 from app.services.base_detector import BaseDetector
-from app.core.storage import processing_status, detection_results, RESULTS_DIR
+from app.core.config import processing_status, detection_results, RESULTS_DIR
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
@@ -32,12 +31,15 @@ ROI_BOTTOM_RATIO = 0.70
 ROI_LEFT_RATIO = 0.0
 ROI_RIGHT_RATIO = 1.0
 
+
 class SignBoardDetector(BaseDetector):
     def __init__(self):
         """Initialize sign board detector with YOLO model"""
         super().__init__(model_path=MODEL_PATH)
 
-    def detect_frame(self, frame, frame_id, results_log, tracker, confirmed, current_time, fps):
+    def detect_frame(
+        self, frame, frame_id, results_log, tracker, confirmed, current_time, fps
+    ):
         """Detect sign boards in a single frame with tracking"""
         h, w = frame.shape[:2]
 
@@ -89,29 +91,37 @@ class SignBoardDetector(BaseDetector):
                             "center": {"x": cx, "y": cy},
                         }
 
-                    detections_in_frame.append({
-                        "frame_id": frame_id,
-                        "signboard_id": track_id,
-                        "type": class_name,
-                        "confidence": round(float(conf), 3),
-                        "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                        "center": {"x": cx, "y": cy},
-                        "area": (x2 - x1) * (y2 - y1),
-                    })
+                    detections_in_frame.append(
+                        {
+                            "frame_id": frame_id,
+                            "signboard_id": track_id,
+                            "type": class_name,
+                            "confidence": round(float(conf), 3),
+                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                            "center": {"x": cx, "y": cy},
+                            "area": (x2 - x1) * (y2 - y1),
+                        }
+                    )
 
             if detections_in_frame:
-                results_log["frames"].append({"frame_id": frame_id, "signboards": detections_in_frame})
+                results_log["frames"].append(
+                    {"frame_id": frame_id, "signboards": detections_in_frame}
+                )
 
         except Exception as e:
             logger.error(f"Sign board detection error: {e}")
 
         return len(detections_in_frame)
 
-    def _process_video_blocking(self, video_id: str, video_path: str, json_path: str, speed: int, loop):
+    def _process_video_blocking(
+        self, video_id: str, video_path: str, json_path: str, speed: int, loop
+    ):
         cap = None
         try:
             asyncio.run_coroutine_threadsafe(
-                manager.send_message(video_id, {"type": "status", "status": "processing", "progress": 0}),
+                manager.send_message(
+                    video_id, {"type": "status", "status": "processing", "progress": 0}
+                ),
                 loop,
             )
 
@@ -125,7 +135,9 @@ class SignBoardDetector(BaseDetector):
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            logger.info(f"Processing sign board detection for {video_id}: {total_frames} frames @ {fps:.1f} FPS")
+            logger.info(
+                f"Processing sign board detection for {video_id}: {total_frames} frames @ {fps:.1f} FPS"
+            )
 
             results_log = {"frames": []}
             tracker = defaultdict(lambda: deque(maxlen=20))
@@ -142,15 +154,28 @@ class SignBoardDetector(BaseDetector):
                 frame_count += 1
                 current_time = frame_count / fps
 
-                n = self.detect_frame(frame, frame_count, results_log, tracker, confirmed, current_time, fps)
+                n = self.detect_frame(
+                    frame,
+                    frame_count,
+                    results_log,
+                    tracker,
+                    confirmed,
+                    current_time,
+                    fps,
+                )
                 total_detections_count += n
 
                 progress = int((frame_count / total_frames) * 100)
                 if progress - last_progress >= 5:
-                    self._send_progress(video_id, progress, loop, {
-                        "unique_signboards": len(confirmed),
-                        "total_detections": total_detections_count,
-                    })
+                    self._send_progress(
+                        video_id,
+                        progress,
+                        loop,
+                        {
+                            "unique_signboards": len(confirmed),
+                            "total_detections": total_detections_count,
+                        },
+                    )
                     last_progress = progress
 
             # Build results
@@ -165,14 +190,22 @@ class SignBoardDetector(BaseDetector):
                     "bbox": info.get("bbox", {}),
                 }
                 if gps_points:
-                    gps_coords = self.find_nearest_gps(info["first_detected_time"], gps_points)
+                    gps_coords = self.find_nearest_gps(
+                        info["first_detected_time"], gps_points
+                    )
                     signboard_data["lat"] = gps_coords["lat"]
                     signboard_data["lng"] = gps_coords["lng"]
                 signboard_list.append(signboard_data)
 
-            signboard_list = sorted(signboard_list, key=lambda x: x["first_detected_frame"])
+            signboard_list = sorted(
+                signboard_list, key=lambda x: x["first_detected_frame"]
+            )
             frames_with_detections = len(results_log["frames"])
-            detection_rate = round((frames_with_detections / frame_count) * 100, 2) if frame_count > 0 else 0
+            detection_rate = (
+                round((frames_with_detections / frame_count) * 100, 2)
+                if frame_count > 0
+                else 0
+            )
 
             results = {
                 "video_id": video_id,
@@ -206,7 +239,14 @@ class SignBoardDetector(BaseDetector):
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
             asyncio.run_coroutine_threadsafe(
-                manager.send_message(video_id, {"type": "complete", "status": "completed", "summary": results["summary"]}),
+                manager.send_message(
+                    video_id,
+                    {
+                        "type": "complete",
+                        "status": "completed",
+                        "summary": results["summary"],
+                    },
+                ),
                 loop,
             )
             return results
@@ -259,7 +299,9 @@ class SignBoardDetector(BaseDetector):
 
             if db_detections:
                 crud.create_detections_bulk(db, db_detections)
-                logger.info(f"Saved {len(db_detections)} signboard detections to database for {video_id}")
+                logger.info(
+                    f"Saved {len(db_detections)} signboard detections to database for {video_id}"
+                )
         except Exception as e:
             logger.error(f"Database save error: {e}")
         finally:

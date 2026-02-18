@@ -10,7 +10,6 @@ import torch
 import ollama
 import base64
 import os
-from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, deque
 from dotenv import load_dotenv
@@ -19,7 +18,7 @@ load_dotenv()
 
 from app.services.base_detector import BaseDetector
 from app.ws.websocket_manager import manager
-from app.core.storage import processing_status, detection_results, RESULTS_DIR
+from app.core.config import processing_status, detection_results, RESULTS_DIR
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection

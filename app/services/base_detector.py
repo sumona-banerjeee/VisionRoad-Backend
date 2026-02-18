@@ -1,21 +1,20 @@
-import cv2
 import json
 import asyncio
 import logging
 import torch
 from pathlib import Path
-from datetime import datetime
 from fastapi import HTTPException
 from ultralytics import YOLO
 from concurrent.futures import ThreadPoolExecutor
 
 from app.ws.websocket_manager import manager
-from app.core.storage import processing_status, detection_results, RESULTS_DIR
+from app.core.config import processing_status, detection_results, RESULTS_DIR
 
 logger = logging.getLogger(__name__)
 
 # Shared thread pool for all detectors
 executor = ThreadPoolExecutor(max_workers=4)
+
 
 class BaseDetector:
     def __init__(self, model_path: str, device: str = None):
@@ -41,6 +40,7 @@ class BaseDetector:
     def _warmup(self):
         try:
             import numpy as np
+
             dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             self.model.predict(dummy, verbose=False, device=self.device)
         except:
@@ -70,7 +70,9 @@ class BaseDetector:
                 raise HTTPException(status_code=404, detail="Results not found")
         return detection_results[video_id]
 
-    async def process_video(self, video_id: str, video_path: str, json_path: str, speed_kmh: int):
+    async def process_video(
+        self, video_id: str, video_path: str, json_path: str, speed_kmh: int
+    ):
         processing_status[video_id] = {"status": "processing", "progress": 0}
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
@@ -83,7 +85,9 @@ class BaseDetector:
             loop,
         )
 
-    def _process_video_blocking(self, video_id: str, video_path: str, json_path: str, speed: int, loop):
+    def _process_video_blocking(
+        self, video_id: str, video_path: str, json_path: str, speed: int, loop
+    ):
         """To be overridden by subclasses"""
         raise NotImplementedError("Subclasses must implement _process_video_blocking")
 
@@ -92,7 +96,7 @@ class BaseDetector:
         message = {"type": "progress", "progress": progress}
         if extra_data:
             message.update(extra_data)
-        
+
         asyncio.run_coroutine_threadsafe(
             manager.send_message(video_id, message),
             loop,

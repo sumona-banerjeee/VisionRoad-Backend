@@ -26,9 +26,31 @@ class DetectionType(str, Enum):
 
 class UploadService:
     def __init__(self):
-        self.pothole_processor = VideoProcessor()  # pothole processor
-        self.signboard_processor = SignBoardDetector()  # signboard processor
-        self.pot_sign_processor = PotSignDetector()  # combined pot-sign processor
+        self._pothole_processor = None
+        self._signboard_processor = None
+        self._pot_sign_processor = None
+
+    def _get_processor(self, detection_type: DetectionType):
+        """Lazy-load the detector only when first requested"""
+        if detection_type == DetectionType.POTHOLE_DETECTION:
+            if self._pothole_processor is None:
+                logger.info("Loading pothole detector...")
+                self._pothole_processor = VideoProcessor()
+            return self._pothole_processor
+        elif detection_type == DetectionType.SIGN_BOARD_DETECTION:
+            if self._signboard_processor is None:
+                logger.info("Loading signboard detector...")
+                self._signboard_processor = SignBoardDetector()
+            return self._signboard_processor
+        elif detection_type == DetectionType.POT_SIGN_DETECTION:
+            if self._pot_sign_processor is None:
+                logger.info("Loading pot-sign detector...")
+                self._pot_sign_processor = PotSignDetector()
+            return self._pot_sign_processor
+        else:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid detection type: {detection_type}"
+            )
 
     async def upload_video(
         self,
@@ -97,17 +119,8 @@ class UploadService:
             "message": "Video uploaded, waiting to process...",
         }
 
-        # Route to appropriate processor based on detection_type
-        if detection_type == DetectionType.POTHOLE_DETECTION:
-            processor = self.pothole_processor
-        elif detection_type == DetectionType.SIGN_BOARD_DETECTION:
-            processor = self.signboard_processor
-        elif detection_type == DetectionType.POT_SIGN_DETECTION:
-            processor = self.pot_sign_processor
-        else:
-            raise HTTPException(
-                status_code=400, detail=f"Invalid detection type: {detection_type}"
-            )
+        # Get processor (lazy-loaded on first use)
+        processor = self._get_processor(detection_type)
 
         # Start background processing
         asyncio.create_task(

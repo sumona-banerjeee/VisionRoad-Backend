@@ -1,3 +1,5 @@
+import time
+import builtins
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -13,12 +15,18 @@ from app.core.logging_config import setup_logging
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
+    start_time = time.time()
+
     # Startup: Initialize logging first
     setup_logging()
 
     # Initialize database
     init_db()
     print("✓ Database initialized")
+
+    elapsed = time.time() - start_time
+    total = time.time() - getattr(builtins, "_boot_start", start_time)
+    print(f"✓ Lifespan init in {elapsed:.2f}s | Total boot time: {total:.2f}s")
     yield
     # Shutdown: cleanup if needed
     print("✓ Application shutdown")

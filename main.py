@@ -1,3 +1,7 @@
+import time
+
+_boot_start = time.time()
+
 import torch
 
 # Monkeypatch torch.load BEFORE any imports that load models
@@ -11,6 +15,10 @@ def _patched_load(*args, **kwargs):
 
 
 torch.load = _patched_load
+
+import builtins
+
+builtins._boot_start = _boot_start  # Share with app lifespan
 
 from app import create_app
 import uvicorn

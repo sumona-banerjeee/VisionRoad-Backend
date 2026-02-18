@@ -196,9 +196,12 @@ class PotSignDetector(BaseDetector):
 
             # Optimized prompt for token efficiency
             prompt = (
-                "Classify: defected_sign_board, good_sign_board, pothole, road_crack, "
-                "damaged_road_marking, or null. "
-                'JSON: {"category": "name", "confidence": "high/medium/low", '
+                "Look at this image and classify it as exactly ONE of: "
+                "defected_sign_board, good_sign_board, pothole, road_crack, damaged_road_marking. "
+                'If the image does NOT match any of these categories, set category to "null" '
+                "and belongs_to_category to false. "
+                "If it DOES match a category, set belongs_to_category to true. "
+                'Respond with JSON: {"category": "name_or_null", "confidence": "high/medium/low", '
                 '"belongs_to_category": true/false}'
             )
 
@@ -302,6 +305,7 @@ class PotSignDetector(BaseDetector):
                 "verified_success": 0,
                 "verified_failed": 0,
                 "skipped": 0,
+                "vl_overrides": 0,
             }
 
             results_log = {"frames": []}
@@ -406,15 +410,33 @@ class PotSignDetector(BaseDetector):
                                             "belongs_to_category", False
                                         )
 
-                                        # Only accept if VL category MATCHES YOLO prediction exactly
-                                        # Reject if: category is null, doesn't match, or belongs is False
                                         if (
                                             vl_category == class_name
                                             and belongs_to_category
                                         ):
+                                            # Tier 1: VL agrees with YOLO — accept as-is
                                             vl_verified = True
                                             vl_stats["verified_success"] += 1
+                                        elif (
+                                            vl_category
+                                            and vl_category != "null"
+                                            and vl_category in ALL_CLASSES
+                                            and belongs_to_category
+                                            and vl_confidence in ("high", "medium")
+                                        ):
+                                            # Tier 2: VL disagrees but returns valid category with good confidence
+                                            # Override YOLO's class with VL's prediction
+                                            logger.info(
+                                                f"VL override tid={tid}: YOLO={class_name} → VL={vl_category} "
+                                                f"(conf={vl_confidence})"
+                                            )
+                                            class_name = vl_category
+                                            tracker_class_lock[tid] = class_name
+                                            vl_verified = True
+                                            vl_stats["verified_success"] += 1
+                                            vl_stats["vl_overrides"] += 1
                                         else:
+                                            # Tier 3: VL returns null, low confidence, or belongs=false — reject
                                             vl_verified = False
                                             rejection_stats["vl_mismatch"] += 1
                                             vl_stats["verified_failed"] += 1
@@ -578,6 +600,7 @@ class PotSignDetector(BaseDetector):
                         "total_verified": vl_stats["total_verified"],
                         "verified_success": vl_stats["verified_success"],
                         "verified_failed": vl_stats["verified_failed"],
+                        "vl_overrides": vl_stats["vl_overrides"],
                         "cache_hits": vl_stats["skipped"],
                     }
                     if ENABLE_VL_VERIFICATION

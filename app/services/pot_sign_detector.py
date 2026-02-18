@@ -5,6 +5,7 @@ This module processes videos to detect both potholes and signboards using combin
 import cv2
 import json
 import asyncio
+import time
 import logging
 import torch
 import ollama
@@ -209,7 +210,8 @@ class PotSignDetector(BaseDetector):
             if not vl_client:
                 return None
 
-            # Call VL model
+            # Call VL model (with timeout to prevent hanging)
+            vl_start = time.time()
             response = vl_client.chat(
                 model=VL_MODEL,
                 format="json",
@@ -221,18 +223,22 @@ class PotSignDetector(BaseDetector):
                     }
                 ],
                 options={"temperature": 0.1},
+                keep_alive=30,
             )
+            vl_elapsed = time.time() - vl_start
 
             # Parse response
             vl_result = json.loads(response["message"]["content"])
             vl_result["yolo_prediction"] = predicted_class
 
-            # Log if VL disagrees with YOLO
-            if vl_result.get("category") != predicted_class:
-                logger.info(
-                    f"VL mismatch: YOLO={predicted_class}, VL={vl_result.get('category')} "
-                    f"(confidence={vl_result.get('confidence')}, belongs={vl_result.get('belongs_to_category')})"
-                )
+            # Log VL result with timing
+            vl_cat = vl_result.get("category")
+            vl_conf = vl_result.get("confidence")
+            match = "✓" if vl_cat == predicted_class else "✗"
+            logger.info(
+                f"VL call {match} [{vl_elapsed:.2f}s]: YOLO={predicted_class}, VL={vl_cat} "
+                f"(confidence={vl_conf}, belongs={vl_result.get('belongs_to_category')})"
+            )
 
             return vl_result
 
@@ -381,10 +387,10 @@ class PotSignDetector(BaseDetector):
                                 MIN_DISTANCE_THRESHOLD,
                             )
                             if not is_dup:
-                                # VL Verification (only for new detections, cached by tid)
                                 vl_result = None
                                 vl_verified = False
-                                # VL Verification Layer (if enabled)
+                                vl_category = None
+                                vl_confidence = None
                                 vl_verified = False
                                 if self.api_keys and ENABLE_VL_VERIFICATION:
                                     # Check cache first

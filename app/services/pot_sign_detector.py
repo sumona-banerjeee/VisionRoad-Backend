@@ -222,8 +222,7 @@ class PotSignDetector(BaseDetector):
                         "images": [base64_image],
                     }
                 ],
-                options={"temperature": 0.1},
-                keep_alive=30,
+                options={"temperature": 0.1}
             )
             vl_elapsed = time.time() - vl_start
 

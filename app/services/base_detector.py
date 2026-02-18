@@ -3,12 +3,11 @@ import asyncio
 import logging
 import torch
 from pathlib import Path
-from fastapi import HTTPException
 from ultralytics import YOLO
 from concurrent.futures import ThreadPoolExecutor
 
 from app.ws.websocket_manager import manager
-from app.core.config import processing_status, detection_results, RESULTS_DIR
+from app.core.config import processing_status
 
 logger = logging.getLogger(__name__)
 
@@ -55,21 +54,7 @@ class BaseDetector:
         )
         return {"lat": nearest_point.get("lat"), "lng": nearest_point.get("lng")}
 
-    async def get_status(self, video_id: str):
-        if video_id not in processing_status:
-            raise HTTPException(status_code=404, detail="Video ID not found")
-        return processing_status[video_id]
-
-    async def get_results(self, video_id: str):
-        if video_id not in detection_results:
-            result_file = RESULTS_DIR / f"{video_id}.json"
-            if result_file.exists():
-                with open(result_file, "r") as f:
-                    detection_results[video_id] = json.load(f)
-            else:
-                raise HTTPException(status_code=404, detail="Results not found")
-        return detection_results[video_id]
-
+    
     async def process_video(
         self, video_id: str, video_path: str, json_path: str, speed_kmh: int
     ):

@@ -5,21 +5,20 @@ from fastapi import (
     Form,
     WebSocket,
     WebSocketDisconnect,
+    HTTPException,
     Depends,
 )
 from sqlalchemy.orm import Session
 import asyncio
 from app.services.upload_service import UploadService, DetectionType
-from app.services.video_processor import VideoProcessor
 from app.ws.websocket_manager import manager
-from app.core.config import processing_status, detection_results
+from app.core.config import processing_status, detection_results,RESULTS_DIR
 from app.db.database import get_db
 
 
 router = APIRouter()
 
 upload_service = UploadService()
-video_processor = VideoProcessor()
 
 
 @router.post("/upload")
@@ -43,13 +42,22 @@ async def upload_video(
 @router.get("/status/{video_id}")
 async def get_status(video_id: str):
     """Get current processing status"""
-    return await video_processor.get_status(video_id)
+    if video_id not in processing_status:
+        raise HTTPException(status_code=404, detail="Video ID not found")
+    return processing_status[video_id]
 
 
 @router.get("/results/{video_id}")
 async def get_results(video_id: str):
     """Get detection results for a processed video"""
-    return await video_processor.get_results(video_id)
+    if video_id not in detection_results:
+            result_file = RESULTS_DIR / f"{video_id}.json"
+            if result_file.exists():
+                with open(result_file, "r") as f:
+                    detection_results[video_id] = json.load(f)
+            else:
+                raise HTTPException(status_code=404, detail="Results not found")
+    return detection_results[video_id]
 
 
 @router.get("/videos")

@@ -503,6 +503,13 @@ class PotSignDetector(BaseDetector):
                                     "detection_id": tid,
                                     "type": class_name,
                                     "confidence": round(float(conf), 3),
+                                    "count":{
+                                        "defected_sign_board":len(counted_ids["defected_sign_board"]),
+                                        "pothole":len(counted_ids["pothole"]),
+                                        "road_crack":len(counted_ids["road_crack"]),
+                                        "damaged_road_marking":len(counted_ids["damaged_road_marking"]),
+                                        "good_sign_board":len(counted_ids["good_sign_board"]),
+                                    },
                                     "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                                     "center": {"x": cx, "y": cy},
                                     "area": (x2 - x1) * (y2 - y1),

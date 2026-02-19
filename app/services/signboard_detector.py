@@ -97,6 +97,7 @@ class SignBoardDetector(BaseDetector):
                             "signboard_id": track_id,
                             "type": class_name,
                             "confidence": round(float(conf), 3),
+                            "signboard_count":len(confirmed),  
                             "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                             "center": {"x": cx, "y": cy},
                             "area": (x2 - x1) * (y2 - y1),

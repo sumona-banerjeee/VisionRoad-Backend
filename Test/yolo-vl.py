@@ -52,7 +52,7 @@ def detect_and_classify_video_frame(frame_path, confidence_threshold=0.5):
         cropped = frame[y1:y2, x1:x2]
         
         # Save temporarily
-        temp_path = r"Test\temp_detection.jpg"
+        temp_path = r"Test\output\temp_detection.jpg"
         cv2.imwrite(temp_path, cropped)
         
         # Encode and classify

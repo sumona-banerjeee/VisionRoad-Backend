@@ -5,6 +5,7 @@ This module processes videos to detect both potholes and signboards using combin
 import cv2
 import json
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import time
 import logging
 import torch
@@ -47,6 +48,10 @@ ENABLE_VL_VERIFICATION = os.getenv("ENABLE_VL_VERIFICATION", "true").lower() == 
 VL_MODEL = "qwen3-vl:235b-instruct-cloud"
 VL_IMAGE_MAX_SIZE = 512  # Max dimension for VL input images
 VL_MIN_BBOX_SIZE = 30  # Skip VL for bboxes smaller than this
+VL_TIMEOUT = int(os.getenv("VL_TIMEOUT_SECONDS", "30"))  # Hard timeout
+
+# Private thread pool used only for VL timeout enforcement
+_vl_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vl_timeout")
 
 
 def load_api_keys():
@@ -107,14 +112,15 @@ class PotSignDetector(BaseDetector):
                 self.key_lock = threading.Lock()
 
     def get_next_api_key(self):
-        """Get next API key in rotation (thread-safe)"""
+        """Get next API key in rotation (thread-safe). Returns (key, key_index) tuple."""
         if not self.api_keys:
-            return None
+            return None, None
 
         with self.key_lock:
-            key = self.api_keys[self.current_key_index]
+            index = self.current_key_index
+            key = self.api_keys[index]
             self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-            return key
+            return key, index + 1  # 1-based index for human-readable logs
 
     @staticmethod
     def calculate_distance(p1, p2):
@@ -175,9 +181,15 @@ class PotSignDetector(BaseDetector):
 
         try:
             # Get next API key in rotation
-            api_key = self.get_next_api_key()
+            api_key, key_index = self.get_next_api_key()
             if not api_key:
                 return None
+
+            # Log which key slot is being used (mask all but last 4 chars)
+            logger.info(
+                f"VL call using API key #{key_index}/{len(self.api_keys)} "
+                f"(key: ...{api_key[-4:]})"
+            )
 
             # Crop detection region
             cropped = frame[y1:y2, x1:x2]
@@ -210,20 +222,36 @@ class PotSignDetector(BaseDetector):
             if not vl_client:
                 return None
 
-            # Call VL model (with timeout to prevent hanging)
+            # --- Hard timeout enforcement via thread ---
+            # client.chat() is a blocking call with no built-in timeout.
+            # If Ollama hangs (network issue, overloaded server, etc.), it will
+            # block the video processing thread forever. We run it in a separate
+            # thread and forcefully abandon it after VL_TIMEOUT seconds.
+            def _call_vl():
+                return vl_client.chat(
+                    model=VL_MODEL,
+                    format="json",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt + "\n\nRespond ONLY with valid JSON.",
+                            "images": [base64_image],
+                        }
+                    ],
+                    options={"temperature": 0.1},
+                )
+
             vl_start = time.time()
-            response = vl_client.chat(
-                model=VL_MODEL,
-                format="json",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt + "\n\nRespond ONLY with valid JSON.",
-                        "images": [base64_image],
-                    }
-                ],
-                options={"temperature": 0.1},
-            )
+            future = _vl_executor.submit(_call_vl)
+            try:
+                response = future.result(timeout=VL_TIMEOUT)
+            except FuturesTimeoutError:
+                vl_elapsed = time.time() - vl_start
+                logger.warning(
+                    f"VL call TIMED OUT after {vl_elapsed:.1f}s for YOLO={predicted_class}. "
+                    f"Skipping VL — YOLO result will be used as-is."
+                )
+                return None
             vl_elapsed = time.time() - vl_start
 
             # Parse response

@@ -222,7 +222,7 @@ class PotSignDetector(BaseDetector):
                         "images": [base64_image],
                     }
                 ],
-                options={"temperature": 0.1}
+                options={"temperature": 0.1},
             )
             vl_elapsed = time.time() - vl_start
 
@@ -390,7 +390,9 @@ class PotSignDetector(BaseDetector):
                                 vl_verified = False
                                 vl_category = None
                                 vl_confidence = None
-                                vl_verified = False
+                                should_accept = (
+                                    True  # Controls whether detection is confirmed
+                                )
                                 if self.api_keys and ENABLE_VL_VERIFICATION:
                                     # Check cache first
                                     if tid in vl_cache:
@@ -442,6 +444,7 @@ class PotSignDetector(BaseDetector):
                                         else:
                                             # Tier 3: VL returns null, low confidence, or belongs=false — reject
                                             vl_verified = False
+                                            should_accept = False
                                             rejection_stats["vl_mismatch"] += 1
                                             vl_stats["verified_failed"] += 1
                                             logger.info(
@@ -450,16 +453,16 @@ class PotSignDetector(BaseDetector):
                                             )
                                             continue  # Skip this detection
                                     else:
-                                        # VL failed or was skipped, use fallback (accept YOLO prediction)
+                                        # VL failed/errored — accept YOLO but mark as NOT VL-verified
                                         if self.api_keys and ENABLE_VL_VERIFICATION:
                                             rejection_stats["vl_errors"] += 1
-                                        vl_verified = True  # Fallback: trust YOLO
-                                else:
-                                    # VL disabled, accept all YOLO detections
-                                    vl_verified = True
+                                        vl_verified = False  # VL did NOT verify this
+                                        should_accept = (
+                                            True  # Still accept based on YOLO
+                                        )
 
-                                # Confirm detection (only if VL verified or VL disabled)
-                                if vl_verified:
+                                # Confirm detection (accepted by VL or VL disabled/errored)
+                                if should_accept:
                                     confirmed[tid] = {
                                         "detection_id": tid,
                                         "type": class_name,
@@ -503,12 +506,18 @@ class PotSignDetector(BaseDetector):
                                     "detection_id": tid,
                                     "type": class_name,
                                     "confidence": round(float(conf), 3),
-                                    "count":{
-                                        "defected_sign_board":len(counted_ids["defected_sign_board"]),
-                                        "pothole":len(counted_ids["pothole"]),
-                                        "road_crack":len(counted_ids["road_crack"]),
-                                        "damaged_road_marking":len(counted_ids["damaged_road_marking"]),
-                                        "good_sign_board":len(counted_ids["good_sign_board"]),
+                                    "count": {
+                                        "defected_sign_board": len(
+                                            counted_ids["defected_sign_board"]
+                                        ),
+                                        "pothole": len(counted_ids["pothole"]),
+                                        "road_crack": len(counted_ids["road_crack"]),
+                                        "damaged_road_marking": len(
+                                            counted_ids["damaged_road_marking"]
+                                        ),
+                                        "good_sign_board": len(
+                                            counted_ids["good_sign_board"]
+                                        ),
                                     },
                                     "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                                     "center": {"x": cx, "y": cy},

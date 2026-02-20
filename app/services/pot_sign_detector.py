@@ -54,9 +54,17 @@ VL_MODEL = "qwen3-vl:235b-instruct-cloud"
 VL_IMAGE_MAX_SIZE = 512  # Max dimension for VL input images
 VL_MIN_BBOX_SIZE = 30  # Skip VL for bboxes smaller than this
 VL_TIMEOUT = int(os.getenv("VL_TIMEOUT_SECONDS", "30"))  # Hard timeout
+MAX_VL_CONCURRENT = int(os.getenv("MAX_VL_CONCURRENT", "4"))  # Max parallel VL calls
 
-# Private thread pool used only for VL timeout enforcement
-_vl_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="vl_timeout")
+# Two separate pools to avoid self-deadlock:
+# 1) _vl_timeout_executor: used INSIDE verify_detection_with_vl for timeout enforcement
+# 2) _async_vl_executor: used OUTSIDE in the frame loop for async VL submissions
+_vl_timeout_executor = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="vl_timeout"
+)
+_async_vl_executor = ThreadPoolExecutor(
+    max_workers=MAX_VL_CONCURRENT, thread_name_prefix="vl_async"
+)
 
 
 def load_api_keys():
@@ -243,7 +251,7 @@ class PotSignDetector(BaseDetector):
                 )
 
             vl_start = time.time()
-            future = _vl_executor.submit(_call_vl)
+            future = _vl_timeout_executor.submit(_call_vl)
             try:
                 response = future.result(timeout=VL_TIMEOUT)
             except FuturesTimeoutError:
@@ -564,18 +572,18 @@ class PotSignDetector(BaseDetector):
                                     cy,
                                 )
 
-                                # Submit async VL verification if enabled
+                                # Submit async VL verification if enabled (capped concurrency)
                                 if (
                                     self.api_keys
                                     and ENABLE_VL_VERIFICATION
                                     and tid not in vl_cache
                                     and tid not in pending_vl
+                                    and len(pending_vl) < MAX_VL_CONCURRENT
                                 ):
-                                    # Make a copy of the frame region for the background thread
                                     frame_copy = frame.copy()
                                     bbox_copy = (x1, y1, x2, y2)
                                     class_copy = class_name
-                                    future = _vl_executor.submit(
+                                    future = _async_vl_executor.submit(
                                         self.verify_detection_with_vl,
                                         frame_copy,
                                         bbox_copy,
@@ -650,17 +658,19 @@ class PotSignDetector(BaseDetector):
             # --- Drain remaining VL futures after video processing ---
             if pending_vl:
                 logger.info(f"Draining {len(pending_vl)} pending VL futures...")
-                from concurrent.futures import wait, FIRST_COMPLETED
+                from concurrent.futures import wait
 
-                remaining_futures = {p["future"]: tid for tid, p in pending_vl.items()}
-                done, _ = wait(remaining_futures.keys(), timeout=VL_TIMEOUT)
+                remaining_futures = [p["future"] for p in pending_vl.values()]
+                done, not_done = wait(remaining_futures, timeout=VL_TIMEOUT)
                 # Process completed ones
                 _process_completed_vl_futures()
+                # Cancel any that didn't finish in time
                 if pending_vl:
                     logger.warning(
-                        f"{len(pending_vl)} VL futures timed out and were abandoned"
+                        f"{len(pending_vl)} VL futures timed out — cancelling"
                     )
                     for tid in list(pending_vl.keys()):
+                        pending_vl[tid]["future"].cancel()
                         rejection_stats["vl_errors"] += 1
                         del pending_vl[tid]
 

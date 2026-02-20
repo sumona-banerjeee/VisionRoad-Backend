@@ -337,6 +337,7 @@ class PotSignDetector(BaseDetector):
             # Pending VL futures: tid -> {future, detection_info}
             pending_vl = {}
             vl_cache = {}  # Cache VL results by detection_id to avoid redundant calls
+            rejected_tids = set()  # Track VL-rejected tids to prevent re-confirmation
 
             def _confirm_detection(
                 tid,
@@ -452,6 +453,8 @@ class PotSignDetector(BaseDetector):
                             if old_class in counted_ids:
                                 counted_ids[old_class].discard(tid)
                             del confirmed[tid]
+                        rejected_tids.add(tid)  # Prevent re-confirmation
+                        vl_cache[tid] = vl_result  # Prevent re-submission
 
                 for tid in done_tids:
                     del pending_vl[tid]
@@ -546,7 +549,11 @@ class PotSignDetector(BaseDetector):
                             else LOW_CONFIDENCE_MIN_FRAMES
                         )
 
-                        if len(recent) >= min_needed and tid not in confirmed:
+                        if (
+                            len(recent) >= min_needed
+                            and tid not in confirmed
+                            and tid not in rejected_tids
+                        ):
                             is_dup, _ = self.is_duplicate_location(
                                 cx,
                                 cy,

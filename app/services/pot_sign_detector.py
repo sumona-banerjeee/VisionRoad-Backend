@@ -298,6 +298,7 @@ class PotSignDetector(BaseDetector):
             )
 
             gps_points = self._load_gps_data(json_path)
+            process_start = time.time()
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 raise Exception("Could not open video")
@@ -662,6 +663,8 @@ class PotSignDetector(BaseDetector):
                     )
                     last_progress = progress
 
+            yolo_end = time.time()
+
             # --- Drain remaining VL futures after video processing ---
             if pending_vl:
                 logger.info(f"Draining {len(pending_vl)} pending VL futures...")
@@ -680,6 +683,8 @@ class PotSignDetector(BaseDetector):
                         pending_vl[tid]["future"].cancel()
                         rejection_stats["vl_errors"] += 1
                         del pending_vl[tid]
+
+            vl_drain_end = time.time()
 
             # Build final results
             defected_sign_board_list = self._get_class_list(
@@ -772,6 +777,32 @@ class PotSignDetector(BaseDetector):
                 + good_sign_board_list
             )
             self._save_to_db(video_id, all_detections_flat)
+            process_end = time.time()
+
+            # Processing time summary
+            total_time = process_end - process_start
+            yolo_time = yolo_end - process_start
+            drain_time = vl_drain_end - yolo_end
+            save_time = process_end - vl_drain_end
+            frames_processed = (
+                frame_count // FRAME_SKIP if FRAME_SKIP > 1 else frame_count
+            )
+            effective_fps = frames_processed / yolo_time if yolo_time > 0 else 0
+            logger.info(
+                f"\n{'='*60}\n"
+                f"  PROCESSING COMPLETE — {video_id}\n"
+                f"{'='*60}\n"
+                f"  Video duration:     {video_duration:.1f}s ({total_frames} frames @ {fps:.0f} FPS)\n"
+                f"  Frames processed:   {frames_processed} (FRAME_SKIP={FRAME_SKIP})\n"
+                f"  ──────────────────────────────────\n"
+                f"  YOLO + frames:      {yolo_time:.1f}s  ({effective_fps:.0f} effective FPS)\n"
+                f"  VL drain:           {drain_time:.1f}s  ({vl_stats['total_verified']} verified)\n"
+                f"  DB save:            {save_time:.1f}s\n"
+                f"  ──────────────────────────────────\n"
+                f"  TOTAL:              {total_time:.1f}s\n"
+                f"  Detections saved:   {len(all_detections_flat)}\n"
+                f"{'='*60}"
+            )
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
             asyncio.run_coroutine_threadsafe(

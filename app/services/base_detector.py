@@ -28,9 +28,14 @@ class BaseDetector:
             self.model = YOLO(self.model_path)
             if self.device.startswith("cuda"):
                 self.model.to(self.device)
-                logger.info(f"Model loaded on GPU: {torch.cuda.get_device_name(0)}")
+                self.model.model.half()  # FP16 — ~1.5x faster, no accuracy loss
+                gpu_name = torch.cuda.get_device_name(0)
+                vram = torch.cuda.get_device_properties(0).total_memory / 1e9
+                logger.info(
+                    f"Model loaded on GPU: {gpu_name} ({vram:.1f} GB VRAM) — FP16 enabled"
+                )
             else:
-                logger.info("Model loaded on CPU")
+                logger.info("Model loaded on CPU (FP32)")
             self._warmup()
         except Exception as e:
             logger.error(f"Failed to load model {self.model_path}: {e}")
@@ -54,7 +59,6 @@ class BaseDetector:
         )
         return {"lat": nearest_point.get("lat"), "lng": nearest_point.get("lng")}
 
-    
     async def process_video(
         self, video_id: str, video_path: str, json_path: str, speed_kmh: int
     ):

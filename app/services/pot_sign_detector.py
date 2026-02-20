@@ -33,6 +33,11 @@ MODEL_PATH = "models/final-v1.pt"
 TRACKER = "botsort.yaml"
 CONF_THRESHOLD = 0.50
 
+# Performance tuning
+FRAME_SKIP = int(os.getenv("FRAME_SKIP", "2"))  # Process every Nth frame (1=no skip)
+YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))  # YOLO inference resolution
+USE_HALF = torch.cuda.is_available()  # FP16 on GPU, FP32 on CPU
+
 # Road damage classes
 ROAD_DAMAGE_CLASSES = {
     "defected_sign_board",
@@ -222,11 +227,7 @@ class PotSignDetector(BaseDetector):
             if not vl_client:
                 return None
 
-            # --- Hard timeout enforcement via thread ---
-            # client.chat() is a blocking call with no built-in timeout.
-            # If Ollama hangs (network issue, overloaded server, etc.), it will
-            # block the video processing thread forever. We run it in a separate
-            # thread and forcefully abandon it after VL_TIMEOUT seconds.
+            # Hard timeout enforcement via thread
             def _call_vl():
                 return vl_client.chat(
                     model=VL_MODEL,
@@ -302,6 +303,10 @@ class PotSignDetector(BaseDetector):
             logger.info(
                 f"Processing combined pot-sign detection for {video_id}: {total_frames} frames @ {fps:.1f} FPS"
             )
+            logger.info(
+                f"Performance settings: FRAME_SKIP={FRAME_SKIP}, YOLO_IMGSZ={YOLO_IMGSZ}, "
+                f"FP16={'ON' if USE_HALF else 'OFF'}, VL={'ASYNC' if ENABLE_VL_VERIFICATION else 'OFF'}"
+            )
 
             # Adaptive parameters
             DETECTION_TIME_WINDOW = video_duration * 0.25
@@ -321,7 +326,127 @@ class PotSignDetector(BaseDetector):
             counted_ids = {cls: set() for cls in ALL_CLASSES}
             spatial_locations = []
             tracker_class_lock = {}
+            # Pending VL futures: tid -> {future, detection_info}
+            pending_vl = {}
             vl_cache = {}  # Cache VL results by detection_id to avoid redundant calls
+
+            def _confirm_detection(
+                tid,
+                class_name,
+                frame_count,
+                current_time,
+                conf,
+                x1,
+                y1,
+                x2,
+                y2,
+                cx,
+                cy,
+                vl_verified=False,
+                vl_confidence=None,
+                vl_category=None,
+            ):
+                """Helper to confirm a detection and update all tracking structures."""
+                confirmed[tid] = {
+                    "detection_id": tid,
+                    "type": class_name,
+                    "first_detected_frame": frame_count,
+                    "first_detected_time": round(current_time, 2),
+                    "confidence": round(float(conf), 3),
+                    "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                    "vl_verified": vl_verified if ENABLE_VL_VERIFICATION else None,
+                    "vl_confidence": vl_confidence,
+                    "vl_category": vl_category,
+                }
+                if class_name in counted_ids:
+                    counted_ids[class_name].add(tid)
+                spatial_locations.append(
+                    {
+                        "center": (cx, cy),
+                        "time": current_time,
+                        "class": class_name,
+                    }
+                )
+                rejection_stats["multi_frame_pending"].discard(tid)
+
+            def _process_completed_vl_futures():
+                """Check pending VL futures and apply results retroactively."""
+                done_tids = []
+                for tid, pending in pending_vl.items():
+                    future = pending["future"]
+                    if not future.done():
+                        continue
+                    done_tids.append(tid)
+
+                    try:
+                        vl_result = future.result(timeout=0)
+                    except Exception as e:
+                        logger.warning(f"VL async error for tid={tid}: {e}")
+                        rejection_stats["vl_errors"] += 1
+                        # Already confirmed with YOLO — leave as-is
+                        continue
+
+                    if not vl_result:
+                        rejection_stats["vl_errors"] += 1
+                        continue
+
+                    vl_stats["total_verified"] += 1
+                    vl_cache[tid] = vl_result
+
+                    vl_category = vl_result.get("category")
+                    vl_confidence = vl_result.get("confidence")
+                    belongs = vl_result.get("belongs_to_category", False)
+                    yolo_class = pending["class_name"]
+
+                    if vl_category == yolo_class and belongs:
+                        # Tier 1: VL agrees — mark as verified
+                        vl_stats["verified_success"] += 1
+                        if tid in confirmed:
+                            confirmed[tid]["vl_verified"] = True
+                            confirmed[tid]["vl_confidence"] = vl_confidence
+                            confirmed[tid]["vl_category"] = vl_category
+                    elif (
+                        vl_category
+                        and vl_category != "null"
+                        and vl_category in ALL_CLASSES
+                        and belongs
+                        and vl_confidence in ("high", "medium")
+                    ):
+                        # Tier 2: VL disagrees but has valid class — override
+                        logger.info(
+                            f"VL async override tid={tid}: YOLO={yolo_class} → VL={vl_category} "
+                            f"(conf={vl_confidence})"
+                        )
+                        vl_stats["verified_success"] += 1
+                        vl_stats["vl_overrides"] += 1
+                        if tid in confirmed:
+                            # Move from old class to new class in counted_ids
+                            old_class = confirmed[tid]["type"]
+                            if old_class in counted_ids:
+                                counted_ids[old_class].discard(tid)
+                            if vl_category in counted_ids:
+                                counted_ids[vl_category].add(tid)
+                            confirmed[tid]["type"] = vl_category
+                            confirmed[tid]["vl_verified"] = True
+                            confirmed[tid]["vl_confidence"] = vl_confidence
+                            confirmed[tid]["vl_category"] = vl_category
+                            tracker_class_lock[tid] = vl_category
+                    else:
+                        # Tier 3: VL rejects — remove the confirmed detection
+                        vl_stats["verified_failed"] += 1
+                        rejection_stats["vl_mismatch"] += 1
+                        logger.info(
+                            f"VL async rejected tid={tid}: YOLO={yolo_class}, "
+                            f"VL={vl_category} (conf={vl_confidence}, belongs={belongs})"
+                        )
+                        if tid in confirmed:
+                            old_class = confirmed[tid]["type"]
+                            if old_class in counted_ids:
+                                counted_ids[old_class].discard(tid)
+                            del confirmed[tid]
+
+                for tid in done_tids:
+                    del pending_vl[tid]
 
             rejection_stats = {
                 "multi_frame_pending": set(),
@@ -351,6 +476,11 @@ class PotSignDetector(BaseDetector):
                     break
 
                 frame_count += 1
+
+                # Frame skipping — road defects persist across frames
+                if FRAME_SKIP > 1 and frame_count % FRAME_SKIP != 0:
+                    continue
+
                 current_time = frame_count / fps
 
                 results = self.model.track(
@@ -360,9 +490,14 @@ class PotSignDetector(BaseDetector):
                     tracker=TRACKER,
                     verbose=False,
                     device=self.device,
+                    imgsz=YOLO_IMGSZ,
+                    half=USE_HALF,
                 )
 
                 frame_data = {"frame_id": frame_count, "detections": []}
+
+                # Process any completed VL futures from previous frames
+                _process_completed_vl_futures()
 
                 if results[0].boxes.id is not None:
                     track_ids = results[0].boxes.id.cpu().numpy().astype(int)
@@ -414,113 +549,42 @@ class PotSignDetector(BaseDetector):
                                 MIN_DISTANCE_THRESHOLD,
                             )
                             if not is_dup:
-                                vl_result = None
-                                vl_verified = False
-                                vl_category = None
-                                vl_confidence = None
-                                should_accept = (
-                                    True  # Controls whether detection is confirmed
+                                # Optimistic accept — confirm now, let VL verify async
+                                _confirm_detection(
+                                    tid,
+                                    class_name,
+                                    frame_count,
+                                    current_time,
+                                    conf,
+                                    x1,
+                                    y1,
+                                    x2,
+                                    y2,
+                                    cx,
+                                    cy,
                                 )
-                                if self.api_keys and ENABLE_VL_VERIFICATION:
-                                    # Check cache first
-                                    if tid in vl_cache:
-                                        vl_result = vl_cache[tid]
-                                        vl_stats["skipped"] += 1
-                                    else:
-                                        # Perform VL verification
-                                        vl_result = self.verify_detection_with_vl(
-                                            frame, (x1, y1, x2, y2), class_name
-                                        )
-                                        vl_cache[tid] = vl_result
 
-                                        if vl_result:
-                                            vl_stats["total_verified"] += 1
-
-                                    # Process VL result
-                                    if vl_result:
-                                        vl_category = vl_result.get("category")
-                                        vl_confidence = vl_result.get("confidence")
-                                        belongs_to_category = vl_result.get(
-                                            "belongs_to_category", False
-                                        )
-
-                                        if (
-                                            vl_category == class_name
-                                            and belongs_to_category
-                                        ):
-                                            # Tier 1: VL agrees with YOLO — accept as-is
-                                            vl_verified = True
-                                            vl_stats["verified_success"] += 1
-                                        elif (
-                                            vl_category
-                                            and vl_category != "null"
-                                            and vl_category in ALL_CLASSES
-                                            and belongs_to_category
-                                            and vl_confidence in ("high", "medium")
-                                        ):
-                                            # Tier 2: VL disagrees but returns valid category with good confidence
-                                            # Override YOLO's class with VL's prediction
-                                            logger.info(
-                                                f"VL override tid={tid}: YOLO={class_name} → VL={vl_category} "
-                                                f"(conf={vl_confidence})"
-                                            )
-                                            class_name = vl_category
-                                            tracker_class_lock[tid] = class_name
-                                            vl_verified = True
-                                            vl_stats["verified_success"] += 1
-                                            vl_stats["vl_overrides"] += 1
-                                        else:
-                                            # Tier 3: VL returns null, low confidence, or belongs=false — reject
-                                            vl_verified = False
-                                            should_accept = False
-                                            rejection_stats["vl_mismatch"] += 1
-                                            vl_stats["verified_failed"] += 1
-                                            logger.info(
-                                                f"VL rejected detection tid={tid}: YOLO={class_name}, "
-                                                f"VL={vl_category} (conf={vl_confidence}, belongs={belongs_to_category})"
-                                            )
-                                            continue  # Skip this detection
-                                    else:
-                                        # VL failed/errored — accept YOLO but mark as NOT VL-verified
-                                        if self.api_keys and ENABLE_VL_VERIFICATION:
-                                            rejection_stats["vl_errors"] += 1
-                                        vl_verified = False  # VL did NOT verify this
-                                        should_accept = (
-                                            True  # Still accept based on YOLO
-                                        )
-
-                                # Confirm detection (accepted by VL or VL disabled/errored)
-                                if should_accept:
-                                    confirmed[tid] = {
-                                        "detection_id": tid,
-                                        "type": class_name,
-                                        "first_detected_frame": frame_count,
-                                        "first_detected_time": round(current_time, 2),
-                                        "confidence": round(float(conf), 3),
-                                        "bbox": {
-                                            "x1": x1,
-                                            "y1": y1,
-                                            "x2": x2,
-                                            "y2": y2,
-                                        },
-                                        "vl_verified": (
-                                            vl_verified
-                                            if ENABLE_VL_VERIFICATION
-                                            else None
-                                        ),
-                                        "vl_confidence": vl_confidence,
-                                        "vl_category": vl_category,
-                                    }
-                                    if class_name in counted_ids:
-                                        counted_ids[class_name].add(tid)
-                                    spatial_locations.append(
-                                        {
-                                            "center": (cx, cy),
-                                            "time": current_time,
-                                            "class": class_name,
-                                        }
+                                # Submit async VL verification if enabled
+                                if (
+                                    self.api_keys
+                                    and ENABLE_VL_VERIFICATION
+                                    and tid not in vl_cache
+                                    and tid not in pending_vl
+                                ):
+                                    # Make a copy of the frame region for the background thread
+                                    frame_copy = frame.copy()
+                                    bbox_copy = (x1, y1, x2, y2)
+                                    class_copy = class_name
+                                    future = _vl_executor.submit(
+                                        self.verify_detection_with_vl,
+                                        frame_copy,
+                                        bbox_copy,
+                                        class_copy,
                                     )
-                                    rejection_stats["multi_frame_pending"].discard(tid)
+                                    pending_vl[tid] = {
+                                        "future": future,
+                                        "class_name": class_copy,
+                                    }
                             else:
                                 rejection_stats["spatial_duplicate"] += 1
                         elif tid not in confirmed:
@@ -582,6 +646,23 @@ class PotSignDetector(BaseDetector):
                         },
                     )
                     last_progress = progress
+
+            # --- Drain remaining VL futures after video processing ---
+            if pending_vl:
+                logger.info(f"Draining {len(pending_vl)} pending VL futures...")
+                from concurrent.futures import wait, FIRST_COMPLETED
+
+                remaining_futures = {p["future"]: tid for tid, p in pending_vl.items()}
+                done, _ = wait(remaining_futures.keys(), timeout=VL_TIMEOUT)
+                # Process completed ones
+                _process_completed_vl_futures()
+                if pending_vl:
+                    logger.warning(
+                        f"{len(pending_vl)} VL futures timed out and were abandoned"
+                    )
+                    for tid in list(pending_vl.keys()):
+                        rejection_stats["vl_errors"] += 1
+                        del pending_vl[tid]
 
             # Build final results
             defected_sign_board_list = self._get_class_list(

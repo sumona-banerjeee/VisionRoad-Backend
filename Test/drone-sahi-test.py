@@ -15,26 +15,29 @@ except ImportError:
 
 # ===================== CONFIG =====================
 MODEL_PATH = r"models\final-v1.pt"
-INPUT_PATH = r"C:\Users\SUMAN\Downloads\8177426-uhd_3840_2160_24fps.mp4"
+INPUT_PATH = r"Test\video\drone-vid-1.mp4"
 OUTPUT_DIR = r"Test\output"
 Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
 # ---- SAHI Slicing Parameters ----
-SLICE_HEIGHT = 640  # Tile height (match YOLO training resolution)
-SLICE_WIDTH = 640  # Tile width
-OVERLAP_RATIO = 0.20  # 20% overlap between tiles (catches edge objects)
+# Portrait 1440x2560 frame → use smaller tiles for finer coverage
+SLICE_HEIGHT = 512  # Smaller tiles = more slices = finer detail per tile
+SLICE_WIDTH = 512
+OVERLAP_RATIO = 0.30  # 30% overlap — reduces missed objects at tile edges
 
 # ---- Detection Thresholds ----
-CONF_THRESHOLD = 0.35  # Lower than dashcam (0.50) — aerial objects score lower
-NMS_THRESHOLD = 0.50  # IoU threshold for merging cross-tile duplicate boxes
+# Dashcam-trained model scores aerial objects low → push threshold down
+CONF_THRESHOLD = 0.25  # More permissive (was 0.35)
+NMS_THRESHOLD = 0.40  # Tighter NMS to merge more aggressively across tiles
 
 # ---- Processing ----
-FRAME_SKIP = 3  # Process every Nth frame (higher = faster, lower = more thorough)
+FRAME_SKIP = 2  # Every 2nd frame (~15 FPS effective) — was 3, catches faster movement
 
 # ---- Drone-tuned Spatial Dedup ----
-# Objects appear smaller from altitude → smaller pixel distance threshold
-MIN_DISTANCE_THRESHOLD = 60  # px (halved vs dashcam 120px)
-TIME_WINDOW_PERCENT = 0.30  # 30% of video duration for dedup window
+# Scale dedup distance to frame height so it's meaningful on 2560px tall frames
+# ~4% of frame height = ~100px for 2560px, similar feel to 120px on 1080p
+MIN_DISTANCE_THRESHOLD = 100  # px (scaled to 1440x2560 resolution)
+TIME_WINDOW_PERCENT = 0.20  # 20% of video — drone moves faster, tighter dedup window
 
 # ===================== CLASS DEFINITIONS =====================
 ROAD_DAMAGE_CLASSES = {

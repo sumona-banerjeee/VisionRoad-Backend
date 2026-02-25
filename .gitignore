@@ -48,6 +48,7 @@ uploads/
 results/
 Test/video/
 Test/output/
+Test/image/
 
 # ====================
 # Alembic Migration Versions

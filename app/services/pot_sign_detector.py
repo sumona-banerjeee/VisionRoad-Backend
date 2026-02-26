@@ -21,6 +21,7 @@ load_dotenv()
 from app.services.base_detector import BaseDetector
 from app.ws.websocket_manager import manager
 from app.core.config import processing_status, detection_results, RESULTS_DIR
+from app.core.logging_config import PerfTimer, perf_logger
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
@@ -266,6 +267,7 @@ class PotSignDetector(BaseDetector):
             # Parse response
             vl_result = json.loads(response["message"]["content"])
             vl_result["yolo_prediction"] = predicted_class
+            vl_result["_vl_elapsed_s"] = vl_elapsed  # used by caller for perf tracking
 
             # Log VL result with timing
             vl_cat = vl_result.get("category")
@@ -299,6 +301,19 @@ class PotSignDetector(BaseDetector):
 
             gps_points = self._load_gps_data(json_path)
             process_start = time.time()
+
+            # ── Performance accumulators ─────────────────────────────────────
+            # Each entry: {"total": float seconds, "count": int}
+            perf_timings = {
+                "frame_decode": {"total": 0.0, "count": 0},
+                "yolo_inference": {"total": 0.0, "count": 0},
+                "gps_coord": {"total": 0.0, "count": 0},  # find_nearest_gps
+                "vl_verification": {"total": 0.0, "count": 0},  # tallied from VL logs
+                "db_gps_match": {"total": 0.0, "count": 0},  # find_location_by_gps
+                "db_bulk_write": {"total": 0.0, "count": 0},  # crud bulk insert
+            }
+            # ────────────────────────────────────────────────────────────────
+
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 raise Exception("Could not open video")
@@ -403,6 +418,11 @@ class PotSignDetector(BaseDetector):
                     vl_stats["total_verified"] += 1
                     vl_cache[tid] = vl_result
 
+                    # Accumulate VL elapsed time into perf_timings
+                    _vl_elapsed = vl_result.pop("_vl_elapsed_s", 0.0)
+                    perf_timings["vl_verification"]["total"] += _vl_elapsed
+                    perf_timings["vl_verification"]["count"] += 1
+
                     vl_category = vl_result.get("category")
                     vl_confidence = vl_result.get("confidence")
                     belongs = vl_result.get("belongs_to_category", False)
@@ -483,9 +503,13 @@ class PotSignDetector(BaseDetector):
             last_progress = 0
 
             while cap.isOpened():
+                _t0_read = time.perf_counter()
                 ret, frame = cap.read()
+                _read_elapsed = time.perf_counter() - _t0_read
                 if not ret:
                     break
+                perf_timings["frame_decode"]["total"] += _read_elapsed
+                perf_timings["frame_decode"]["count"] += 1
 
                 frame_count += 1
 
@@ -495,16 +519,19 @@ class PotSignDetector(BaseDetector):
 
                 current_time = frame_count / fps
 
-                results = self.model.track(
-                    frame,
-                    persist=True,
-                    conf=CONF_THRESHOLD,
-                    tracker=TRACKER,
-                    verbose=False,
-                    device=self.device,
-                    imgsz=YOLO_IMGSZ,
-                    half=USE_HALF,
-                )
+                with PerfTimer("YOLO inference", video_id) as _t_yolo:
+                    results = self.model.track(
+                        frame,
+                        persist=True,
+                        conf=CONF_THRESHOLD,
+                        tracker=TRACKER,
+                        verbose=False,
+                        device=self.device,
+                        imgsz=YOLO_IMGSZ,
+                        half=USE_HALF,
+                    )
+                perf_timings["yolo_inference"]["total"] += _t_yolo.elapsed
+                perf_timings["yolo_inference"]["count"] += 1
 
                 frame_data = {"frame_id": frame_count, "detections": []}
 
@@ -686,17 +713,21 @@ class PotSignDetector(BaseDetector):
 
             vl_drain_end = time.time()
 
-            # Build final results
+            # Build final results — time GPS coord lookup here
             defected_sign_board_list = self._get_class_list(
-                confirmed, "defected_sign_board", gps_points
+                confirmed, "defected_sign_board", gps_points, perf_timings
             )
-            pothole_list = self._get_class_list(confirmed, "pothole", gps_points)
-            road_crack_list = self._get_class_list(confirmed, "road_crack", gps_points)
+            pothole_list = self._get_class_list(
+                confirmed, "pothole", gps_points, perf_timings
+            )
+            road_crack_list = self._get_class_list(
+                confirmed, "road_crack", gps_points, perf_timings
+            )
             damaged_road_marking_list = self._get_class_list(
-                confirmed, "damaged_road_marking", gps_points
+                confirmed, "damaged_road_marking", gps_points, perf_timings
             )
             good_sign_board_list = self._get_class_list(
-                confirmed, "good_sign_board", gps_points
+                confirmed, "good_sign_board", gps_points, perf_timings
             )
 
             frames_with_detections = len(results_log["frames"])
@@ -776,33 +807,64 @@ class PotSignDetector(BaseDetector):
                 + damaged_road_marking_list
                 + good_sign_board_list
             )
-            self._save_to_db(video_id, all_detections_flat)
+            self._save_to_db(video_id, all_detections_flat, perf_timings)
             process_end = time.time()
 
-            # Processing time summary
+            # ── Structured PERF REPORT ────────────────────────────────────────
             total_time = process_end - process_start
             yolo_time = yolo_end - process_start
             drain_time = vl_drain_end - yolo_end
-            save_time = process_end - vl_drain_end
             frames_processed = (
                 frame_count // FRAME_SKIP if FRAME_SKIP > 1 else frame_count
             )
-            effective_fps = frames_processed / yolo_time if yolo_time > 0 else 0
-            logger.info(
-                f"\n{'='*60}\n"
-                f"  PROCESSING COMPLETE — {video_id}\n"
-                f"{'='*60}\n"
-                f"  Video duration:     {video_duration:.1f}s ({total_frames} frames @ {fps:.0f} FPS)\n"
-                f"  Frames processed:   {frames_processed} (FRAME_SKIP={FRAME_SKIP})\n"
-                f"  ──────────────────────────────────\n"
-                f"  YOLO + frames:      {yolo_time:.1f}s  ({effective_fps:.0f} effective FPS)\n"
-                f"  VL drain:           {drain_time:.1f}s  ({vl_stats['total_verified']} verified)\n"
-                f"  DB save:            {save_time:.1f}s\n"
-                f"  ──────────────────────────────────\n"
-                f"  TOTAL:              {total_time:.1f}s\n"
-                f"  Detections saved:   {len(all_detections_flat)}\n"
-                f"{'='*60}"
-            )
+
+            def _fmt(stage_key):
+                """Format a perf_timings entry as (total_s, count, avg_ms)."""
+                d = perf_timings[stage_key]
+                total = d["total"]
+                count = d["count"]
+                avg_ms = (total / count * 1000) if count > 0 else 0.0
+                return total, count, avg_ms
+
+            fd_t, fd_c, fd_avg = _fmt("frame_decode")
+            yi_t, yi_c, yi_avg = _fmt("yolo_inference")
+            gc_t, gc_c, gc_avg = _fmt("gps_coord")
+            vl_t, vl_c, vl_avg = _fmt("vl_verification")
+            dg_t, dg_c, dg_avg = _fmt("db_gps_match")
+            db_t, db_c, db_avg = _fmt("db_bulk_write")
+
+            # Highlight potential bottlenecks (> 20% of total time)
+            def _flag(t):
+                return " ⚠️" if total_time > 0 and (t / total_time) > 0.20 else ""
+
+            report_lines = [
+                f"{'=' * 78}",
+                f"  PERF REPORT — [{video_id}]",
+                f"{'=' * 78}",
+                f"  {'Stage':<30} {'Total (s)':>10} {'Count':>7} {'Avg/call (ms)':>15}",
+                f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
+                f"  {'Frame decode (I/O)':<30} {fd_t:>10.3f} {fd_c:>7d} {fd_avg:>15.2f}{_flag(fd_t)}",
+                f"  {'YOLO inference':<30} {yi_t:>10.3f} {yi_c:>7d} {yi_avg:>15.2f}{_flag(yi_t)}",
+                f"  {'GPS coord lookup':<30} {gc_t:>10.3f} {gc_c:>7d} {gc_avg:>15.2f}{_flag(gc_t)}",
+                f"  {'VL verification (async)':<30} {vl_t:>10.3f} {vl_c:>7d} {vl_avg:>15.2f}{_flag(vl_t)}",
+                f"  {'VL drain (post-loop)':<30} {drain_time:>10.3f} {'N/A':>7} {'N/A':>15}",
+                f"  {'DB GPS matching':<30} {dg_t:>10.3f} {dg_c:>7d} {dg_avg:>15.2f}{_flag(dg_t)}",
+                f"  {'DB bulk write':<30} {db_t:>10.3f} {db_c:>7d} {db_avg:>15.2f}{_flag(db_t)}",
+                f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
+                f"  {'TOTAL pipeline time':<30} {total_time:>10.3f}s",
+                f"  {'Video duration':<30} {video_duration:>10.1f}s  ({total_frames} frames @ {fps:.0f} FPS)",
+                f"  {'Frames processed':<30} {frames_processed:>10d}  (FRAME_SKIP={FRAME_SKIP})",
+                f"  {'Detections saved':<30} {len(all_detections_flat):>10d}",
+                f"  {'VL verifications done':<30} {vl_stats['total_verified']:>10d}",
+                f"{'=' * 78}",
+            ]
+            report_str = "\n".join(report_lines)
+
+            # Write to the dedicated perf log (clean for parsing/charting)
+            perf_logger.info(f"\n{report_str}")
+            # Also appear in the main application log at INFO
+            logger.info(f"\n{report_str}")
+            # ────────────────────────────────────────────────────────────────
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
             asyncio.run_coroutine_threadsafe(
@@ -832,7 +894,7 @@ class PotSignDetector(BaseDetector):
                 cap.release()
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-    def _get_class_list(self, confirmed, class_name, gps_points):
+    def _get_class_list(self, confirmed, class_name, gps_points, perf_timings=None):
         lst = []
         for tid, info in confirmed.items():
             if info["type"] == class_name:
@@ -848,14 +910,19 @@ class PotSignDetector(BaseDetector):
                     "vl_category": info.get("vl_category"),
                 }
                 if gps_points:
+                    _t0 = time.perf_counter()
                     gps_coords = self.find_nearest_gps(
                         info["first_detected_time"], gps_points
                     )
+                    _gps_elapsed = time.perf_counter() - _t0
+                    if perf_timings is not None:
+                        perf_timings["gps_coord"]["total"] += _gps_elapsed
+                        perf_timings["gps_coord"]["count"] += 1
                     det_data.update(gps_coords)
                 lst.append(det_data)
         return sorted(lst, key=lambda x: x["first_detected_frame"])
 
-    def _save_to_db(self, video_id, all_detections):
+    def _save_to_db(self, video_id, all_detections, perf_timings=None):
         db = SessionLocal()
         try:
             db_detections = []
@@ -863,7 +930,18 @@ class PotSignDetector(BaseDetector):
                 lat, lng = det.get("lat"), det.get("lng")
                 project_id, package_id, location_id = None, None, None
                 if lat and lng:
+                    # ⏱ Time the GPS-based location DB lookup (potential bottleneck: full table scan)
+                    _t0 = time.perf_counter()
                     location = find_location_by_gps(db, lat, lng)
+                    _gps_db_elapsed = time.perf_counter() - _t0
+                    if perf_timings is not None:
+                        perf_timings["db_gps_match"]["total"] += _gps_db_elapsed
+                        perf_timings["db_gps_match"]["count"] += 1
+                    perf_logger.info(
+                        f"[{video_id}] DB GPS match | {_gps_db_elapsed:.4f}s"
+                        f" | lat={lat:.5f} lng={lng:.5f}"
+                        f" | {'HIT' if location else 'MISS'}"
+                    )
                     if location:
                         location_id, package_id = location.id, location.package_id
                         if location.package:
@@ -886,7 +964,17 @@ class PotSignDetector(BaseDetector):
                 db_detections.append(db_det)
 
             if db_detections:
+                # ⏱ Time the bulk insert
+                _t0 = time.perf_counter()
                 crud.create_detections_bulk(db, db_detections)
+                _bulk_elapsed = time.perf_counter() - _t0
+                if perf_timings is not None:
+                    perf_timings["db_bulk_write"]["total"] += _bulk_elapsed
+                    perf_timings["db_bulk_write"]["count"] += 1
+                perf_logger.info(
+                    f"[{video_id}] DB bulk write | {_bulk_elapsed:.4f}s"
+                    f" | {len(db_detections)} rows"
+                )
                 logger.info(
                     f"Saved {len(db_detections)} detections to database for {video_id}"
                 )

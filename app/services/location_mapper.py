@@ -1,8 +1,10 @@
 """Location mapping service for GPS-based detection assignment"""
 
+import time
 from sqlalchemy.orm import Session
 from typing import Optional
 from app.models.location import Location
+from app.core.logging_config import perf_logger
 
 
 def find_location_by_gps(
@@ -32,13 +34,29 @@ def find_location_by_gps(
     if package_id:
         query = query.filter(Location.package_id == package_id)
 
+    _t0 = time.perf_counter()
     locations = query.all()
+    _fetch_elapsed = time.perf_counter() - _t0
+    perf_logger.debug(
+        f"[location_mapper] DB fetch {len(locations)} locations | {_fetch_elapsed:.4f}s"
+    )
 
     # Check each location's bounding box using contains_point
+    _t1 = time.perf_counter()
     for location in locations:
         if location.contains_point(lat, lng):
+            _scan_elapsed = time.perf_counter() - _t1
+            perf_logger.debug(
+                f"[location_mapper] bbox scan HIT after {_scan_elapsed:.4f}s"
+                f" | lat={lat:.5f} lng={lng:.5f} → {location.segment_name}"
+            )
             return location
 
+    _scan_elapsed = time.perf_counter() - _t1
+    perf_logger.debug(
+        f"[location_mapper] bbox scan MISS after {_scan_elapsed:.4f}s"
+        f" | lat={lat:.5f} lng={lng:.5f} | scanned {len(locations)} rows"
+    )
     return None
 
 

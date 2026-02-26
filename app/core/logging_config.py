@@ -5,6 +5,7 @@ Configures both console and file logging with rotation
 
 import logging
 import logging.handlers
+import time
 from pathlib import Path
 
 # Create logs directory
@@ -15,12 +16,51 @@ LOGS_DIR.mkdir(exist_ok=True)
 MAIN_LOG_FILE = LOGS_DIR / "visionroad.log"
 ERROR_LOG_FILE = LOGS_DIR / "error.log"
 DETECTION_LOG_FILE = LOGS_DIR / "detection.log"
+PERF_LOG_FILE = LOGS_DIR / "perf.log"  # New performance log file
 
 # Logging format with file, function, and line number for precision
 LOG_FORMAT = (
     "%(asctime)s - %(levelname)s - %(name)s:%(funcName)s:%(lineno)d - %(message)s"
 )
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# Performance logger — propagate=False so timing entries don't bleed into visionroad.log
+perf_logger = logging.getLogger("visionroad.perf")
+perf_logger.setLevel(logging.INFO)
+perf_logger.propagate = False
+
+
+class PerfTimer:
+    """
+    Context manager for timing pipeline stages.
+
+    Usage:
+        with PerfTimer("YOLO inference", video_id) as t:
+            results = model.track(...)
+        # t.elapsed  → duration in seconds
+        # t.elapsed_ms → duration in milliseconds
+
+    Writes one line to perf_logger on exit:
+        [<video_id>] <stage> | <elapsed>s
+    """
+
+    def __init__(self, stage: str, video_id: str = ""):
+        self.stage = stage
+        self.video_id = video_id
+        self.elapsed: float = 0.0  # seconds
+        self.elapsed_ms: float = 0.0  # milliseconds
+        self._start: float = 0.0
+
+    def __enter__(self):
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, *_):
+        self.elapsed = time.perf_counter() - self._start
+        self.elapsed_ms = self.elapsed * 1000
+        prefix = f"[{self.video_id}] " if self.video_id else ""
+        perf_logger.info(f"{prefix}{self.stage} | {self.elapsed:.4f}s")
+        return False  # don't suppress exceptions
 
 
 def setup_logging():
@@ -84,6 +124,20 @@ def setup_logging():
         specific_logger = logging.getLogger(logger_name)
         specific_logger.addHandler(detection_handler)
 
+    # Performance log file handler — clean pipe-delimited format for easy parsing
+    perf_handler = logging.handlers.RotatingFileHandler(
+        PERF_LOG_FILE,
+        maxBytes=5 * 1024 * 1024,  # 5MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    perf_handler.setLevel(logging.INFO)
+    perf_formatter = logging.Formatter("%(asctime)s | %(message)s", DATE_FORMAT)
+    perf_handler.setFormatter(perf_formatter)
+    # Only add if handler not already present (avoid duplicates on reload)
+    if not perf_logger.handlers:
+        perf_logger.addHandler(perf_handler)
+
     # Suppress noisy libraries
     logging.getLogger("ultralytics").setLevel(logging.WARNING)
     logging.getLogger("torch").setLevel(logging.WARNING)
@@ -94,4 +148,5 @@ def setup_logging():
     logging.info(f"Main log: {MAIN_LOG_FILE}")
     logging.info(f"Error log: {ERROR_LOG_FILE}")
     logging.info(f"Detection log: {DETECTION_LOG_FILE}")
+    logging.info(f"Performance log: {PERF_LOG_FILE}")  # New log file info
     logging.info("=" * 60)

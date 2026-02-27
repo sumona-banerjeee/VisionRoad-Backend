@@ -33,7 +33,7 @@ MANHOLE_IDX = PROMPTS.index("manhole cover")
 INFERENCE_SIZE = 1024  
 BOX_THRESHOLD = 0.6    
 SHOW_PREVIEW = False
-BATCH_SIZE = 8        
+BATCH_SIZE = 4     
  
 COMPILE_MODEL = False if os.name == 'nt' else True
  

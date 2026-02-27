@@ -29,8 +29,7 @@ FPS_CLAMP_MAX = 60
 PROMPTS = [
     "broken traffic signboard",
     "discolored traffic signboard",
-    "pothole and puddle",
-    # "puddle",
+    "pothole OR puddle",
     "road crack",
     "manhole cover",
     "damaged road marking",
@@ -57,8 +56,7 @@ COLORS = [
 PROMPT_TO_KEY = {
     "broken traffic signboard": "broken_traffic_signboard",
     "discolored traffic signboard": "discolored_traffic_signboard",
-    "pothole and puddle": "pothole_and_puddle",
-    # "puddle": "puddle",
+    "pothole OR puddle": "pothole_or_puddle",
     "road crack": "road_crack",
     "manhole cover": "manhole_cover",
     "damaged road marking": "damaged_road_marking",
@@ -90,7 +88,7 @@ def build_sv_detections(frame_results, height, width, manhole_mask):
             mask_bool = mask.astype(bool)
 
             # pothole-manhole suppression (unchanged core logic)
-            if prompt_name == "pothole and puddle":
+            if prompt_name == "pothole OR puddle":
                 total_area = mask_bool.sum()
                 overlap_area = (mask_bool & manhole_mask).sum()
                 if total_area > 0 and (overlap_area / total_area) > 0.4:
@@ -148,6 +146,7 @@ def main():
     torch.backends.cuda.enable_flash_sdp(True)
 
     print("⏳ Loading SAM 3 into VRAM...")
+    t_load_start = time.time()
     try:
         model = Sam3Model.from_pretrained(
             "facebook/sam3",
@@ -161,6 +160,8 @@ def main():
     except Exception as e:
         print(f"Error loading model: {e}")
         return
+    t_model_load = time.time() - t_load_start
+    print(f"✅ Model loaded in {t_model_load:.1f}s")
 
     if not os.path.exists(INPUT_VIDEO):
         print("❌ Input video not found.")
@@ -200,6 +201,13 @@ def main():
     frame_count = 0
     det_id_ctr = 0  # used only for first-seen entries in class_lists
 
+    # --- Cumulative timing accumulators ---
+    t_total_start = time.time()
+    acc_cpu_prep = 0.0  # processor tokenise + .to(device)
+    acc_gpu_infer = 0.0  # SAM3 forward pass
+    acc_post_draw = 0.0  # post_process + ByteTrack + OpenCV draw
+    acc_video_write = 0.0  # out.write() calls
+
     frames_buffer = []
     original_frames = []
 
@@ -229,6 +237,7 @@ def main():
                 if inputs["pixel_values"].dtype != torch.bfloat16:
                     inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
                 cpu_prep_time = time.time() - t0_cpu
+                acc_cpu_prep += cpu_prep_time
 
                 # --- GPU INFERENCE (unchanged core) ---
                 t0_gpu = time.time()
@@ -239,6 +248,7 @@ def main():
                     outputs = model(**inputs)
                 torch.cuda.synchronize()
                 gpu_time = time.time() - t0_gpu
+                acc_gpu_infer += gpu_time
 
                 # --- POST-PROCESS ---
                 t0_post = time.time()
@@ -488,10 +498,13 @@ def main():
                             }
                         )
 
+                    t_w = time.time()
                     out.write(base_frame)
+                    acc_video_write += time.time() - t_w
 
                 frame_count += len(frames_buffer)
                 post_time = time.time() - t0_post
+                acc_post_draw += post_time
 
                 active_counts = {k: v for k, v in defect_counts.items() if v > 0}
                 sys.stdout.write(
@@ -549,25 +562,56 @@ def main():
         "frames": frames_log,
     }
 
+    # ------------------------------------------------------------------
+    # Final summary
+    # ------------------------------------------------------------------
+    t_json_start = time.time()
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
+    t_json_write = time.time() - t_json_start
 
-    # ------------------------------------------------------------------
-    # Final summary table
-    # ------------------------------------------------------------------
-    print(f"\n\n{'='*55}")
-    print(f"  ✅  SAM 3 v2 — Unique Object Count (ByteTrack)")
-    print(f"{'='*55}")
+    t_total_elapsed = time.time() - t_total_start
+    acc_other = (
+        t_total_elapsed
+        - t_model_load
+        - acc_cpu_prep
+        - acc_gpu_infer
+        - acc_post_draw
+        - acc_video_write
+        - t_json_write
+    )
+
+    W = 55
+    print(f"\n\n{'='*W}")
+    print(f"  ✅  SAM 3 v2 — Detection Summary (ByteTrack)")
+    print(f"{'='*W}")
     print(f"  {'Class':<35} {'Count':>6}")
-    print(f"  {'-'*41}")
+    print(f"  {'-'*(W-4)}")
     for k, v in defect_counts.items():
         print(f"  {k:<35} {v:>6}")
-    print(f"  {'-'*41}")
+    print(f"  {'-'*(W-4)}")
     print(f"  {'TOTAL UNIQUE OBJECTS':<35} {total_defects:>6}")
-    print(f"{'='*55}")
+    print(f"\n{'='*W}")
+    print(f"  ⏱️   Timing Breakdown")
+    print(f"{'='*W}")
+    print(f"  {'Stage':<35} {'Time':>8}")
+    print(f"  {'-'*(W-4)}")
+    print(f"  {'Model Load (SAM3 + processor)':<35} {t_model_load:>7.1f}s")
+    print(f"  {'CPU Prep (tokenise + .to(cuda))':<35} {acc_cpu_prep:>7.1f}s")
+    print(f"  {'GPU Inference (SAM3 forward)':<35} {acc_gpu_infer:>7.1f}s")
+    print(f"  {'Post-process + Track + Draw':<35} {acc_post_draw:>7.1f}s")
+    print(f"  {'Video Write (out.write)':<35} {acc_video_write:>7.1f}s")
+    print(f"  {'JSON Write':<35} {t_json_write:>7.2f}s")
+    print(f"  {'Other (I/O, loop overhead)':<35} {max(acc_other,0):>7.1f}s")
+    print(f"  {'-'*(W-4)}")
+    print(f"  {'TOTAL WALL TIME':<35} {t_total_elapsed:>7.1f}s")
+    per_frame = t_total_elapsed / frame_count if frame_count else 0
+    print(f"  {'Per Frame (avg)':<35} {per_frame:>7.3f}s")
+    print(f"  {'Effective FPS processed':<35} {1/per_frame if per_frame else 0:>7.2f}")
+    print(f"{'='*W}")
     print(f"  📹  Video  → {OUTPUT_VIDEO}")
     print(f"  📄  Report → {OUTPUT_JSON}")
-    print(f"{'='*55}\n")
+    print(f"{'='*W}\n")
 
 
 if __name__ == "__main__":

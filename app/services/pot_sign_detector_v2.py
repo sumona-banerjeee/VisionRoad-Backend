@@ -146,24 +146,25 @@ class PotSignDetector(BaseDetector):
         cy,
         class_name,
         current_time,
-        spatial_locations,
+        spatial_by_class,
         time_threshold,
         min_distance_threshold,
     ):
         """Check if this location/class was already counted recently."""
-        for existing in spatial_locations:
+        bucket = spatial_by_class[class_name]
+
+        # Prune stale entries from the left of the deque
+        while bucket and (current_time - bucket[0]["time"]) >= time_threshold:
+            bucket.popleft()
+
+        for existing in bucket:
             prev_cx, prev_cy = existing["center"]
-            prev_class = existing["class"]
             prev_time = existing["time"]
 
             distance = self.calculate_distance((cx, cy), (prev_cx, prev_cy))
             time_gap = current_time - prev_time
 
-            if (
-                prev_class == class_name
-                and distance < min_distance_threshold
-                and time_gap < time_threshold
-            ):
+            if distance < min_distance_threshold and time_gap < time_threshold:
                 reason = f"{distance:.1f}px from existing, {time_gap:.2f}s ago"
                 return True, reason
         return False, None
@@ -333,7 +334,7 @@ class PotSignDetector(BaseDetector):
             tracker_history = defaultdict(lambda: deque(maxlen=50))
             confirmed = {}
             counted_ids = {cls: set() for cls in ALL_CLASSES}
-            spatial_locations = []
+            spatial_by_class = {cls: deque() for cls in ALL_CLASSES}
             tracker_class_lock = {}
             # Pending VL futures: tid -> {future, detection_info}
             pending_vl = {}
@@ -370,11 +371,10 @@ class PotSignDetector(BaseDetector):
                 }
                 if class_name in counted_ids:
                     counted_ids[class_name].add(tid)
-                spatial_locations.append(
+                spatial_by_class[class_name].append(
                     {
                         "center": (cx, cy),
                         "time": current_time,
-                        "class": class_name,
                     }
                 )
                 rejection_stats["multi_frame_pending"].discard(tid)
@@ -436,6 +436,16 @@ class PotSignDetector(BaseDetector):
                                 counted_ids[old_class].discard(tid)
                             if vl_category in counted_ids:
                                 counted_ids[vl_category].add(tid)
+                            # Migrate spatial bucket entry from old class to new class
+                            old_bucket = spatial_by_class[old_class]
+                            entry_to_move = None
+                            for entry in old_bucket:
+                                if abs(entry["time"] - confirmed[tid]["first_detected_time"]) < 0.1:
+                                    entry_to_move = entry
+                                    break
+                            if entry_to_move is not None:
+                                old_bucket.remove(entry_to_move)
+                                spatial_by_class[vl_category].append(entry_to_move)
                             confirmed[tid]["type"] = vl_category
                             confirmed[tid]["vl_verified"] = True
                             confirmed[tid]["vl_confidence"] = vl_confidence
@@ -560,7 +570,7 @@ class PotSignDetector(BaseDetector):
                                 cy,
                                 class_name,
                                 current_time,
-                                spatial_locations,
+                                spatial_by_class,
                                 TIME_THRESHOLD,
                                 MIN_DISTANCE_THRESHOLD,
                             )

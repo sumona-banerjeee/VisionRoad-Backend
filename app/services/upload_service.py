@@ -12,11 +12,11 @@ from app.models.processing import ProcessingStatusEnum
 from app.services.video_processor import VideoProcessor
 from app.services.signboard_detector import SignBoardDetector
 from app.services.pot_sign_detector import PotSignDetector
+# from app.services.pot_sign_detector_v2 import PotSignDetector
 from app.core.config import processing_status, UPLOAD_DIR
 from app.ws.websocket_manager import manager
 
 logger = logging.getLogger(__name__)
-
 
 class DetectionType(str, Enum):
     POTHOLE_DETECTION = "pothole-detection"

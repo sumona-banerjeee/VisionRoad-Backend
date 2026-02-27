@@ -29,8 +29,8 @@ FPS_CLAMP_MAX = 60
 PROMPTS = [
     "broken traffic signboard",
     "discolored traffic signboard",
-    "pothole",
-    "puddle",
+    "pothole and puddle",
+    # "puddle",
     "road crack",
     "manhole cover",
     "damaged road marking",
@@ -57,8 +57,8 @@ COLORS = [
 PROMPT_TO_KEY = {
     "broken traffic signboard": "broken_traffic_signboard",
     "discolored traffic signboard": "discolored_traffic_signboard",
-    "pothole": "pothole",
-    "puddle": "puddle",
+    "pothole and puddle": "pothole_and_puddle",
+    # "puddle": "puddle",
     "road crack": "road_crack",
     "manhole cover": "manhole_cover",
     "damaged road marking": "damaged_road_marking",
@@ -90,7 +90,7 @@ def build_sv_detections(frame_results, height, width, manhole_mask):
             mask_bool = mask.astype(bool)
 
             # pothole-manhole suppression (unchanged core logic)
-            if prompt_name == "pothole":
+            if prompt_name == "pothole and puddle":
                 total_area = mask_bool.sum()
                 overlap_area = (mask_bool & manhole_mask).sum()
                 if total_area > 0 and (overlap_area / total_area) > 0.4:

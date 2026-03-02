@@ -385,68 +385,70 @@ def main():
     pending_inputs = None  # Future for the next batch's preprocessed inputs
 
     try:
+        ret = True
         while True:
             # ---- COLLECT A BATCH OF FRAMES ----
-            ret, frame = cap.read()
-            if ret:
+            while len(frames_buffer) < BATCH_SIZE and ret:
+                ret, frame = cap.read()
+                if not ret:
+                    break
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 image_pil = Image.fromarray(frame_rgb)
                 image_pil.thumbnail((INFERENCE_SIZE, INFERENCE_SIZE))
                 frames_buffer.append(image_pil)
                 original_frames.append(frame)
 
-            if len(frames_buffer) == BATCH_SIZE or (not ret and len(frames_buffer) > 0):
+            if len(frames_buffer) == 0:
+                break
 
-                # ---- CPU PREP (may be pre-fetched from previous iteration) ----
-                t0_cpu = time.time()
-                if pending_inputs is not None:
-                    inputs = pending_inputs.result()  # wait for prefetch
-                else:
-                    inputs = prepare_inputs(frames_buffer, processor)
+            # ---- CPU PREP (may be pre-fetched from previous iteration) ----
+            t0_cpu = time.time()
+            if pending_inputs is not None:
+                inputs = pending_inputs.result()  # wait for prefetch
+                pending_inputs = None  # consume it
+            else:
+                inputs = prepare_inputs(frames_buffer, processor)
 
-                # OPT: non-blocking transfer with pinned memory
-                inputs = {
-                    k: (
-                        v.to(device, non_blocking=True)
-                        if isinstance(v, torch.Tensor)
-                        else v
+            # OPT: non-blocking transfer with pinned memory
+            inputs = {
+                k: (
+                    v.to(device, non_blocking=True)
+                    if isinstance(v, torch.Tensor)
+                    else v
+                )
+                for k, v in inputs.items()
+            }
+            if inputs["pixel_values"].dtype != torch.bfloat16:
+                inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
+
+            current_batch_size = len(frames_buffer)
+            cpu_prep_time = time.time() - t0_cpu
+            acc_cpu_prep += cpu_prep_time
+
+            # ---- OPT 3: START PREFETCH FOR NEXT BATCH (overlaps with GPU) ----
+            next_frames_buffer = []
+            next_original_frames = []
+            next_ret = ret
+
+            if next_ret:
+                while len(next_frames_buffer) < BATCH_SIZE:
+                    next_ret, next_frame = cap.read()
+                    if not next_ret:
+                        break
+                    nf_rgb = cv2.cvtColor(next_frame, cv2.COLOR_BGR2RGB)
+                    nf_pil = Image.fromarray(nf_rgb)
+                    nf_pil.thumbnail((INFERENCE_SIZE, INFERENCE_SIZE))
+                    next_frames_buffer.append(nf_pil)
+                    next_original_frames.append(next_frame)
+
+                if next_frames_buffer:
+                    pending_inputs = prefetch_executor.submit(
+                        prepare_inputs, next_frames_buffer, processor
                     )
-                    for k, v in inputs.items()
-                }
-                if inputs["pixel_values"].dtype != torch.bfloat16:
-                    inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
-
-                # Snapshot batch size BEFORE any prefetch swap
-                current_batch_size = len(frames_buffer)
-
-                cpu_prep_time = time.time() - t0_cpu
-                acc_cpu_prep += cpu_prep_time
-
-                # ---- OPT 3: START PREFETCH FOR NEXT BATCH (overlaps with GPU) ----
-                # We'll collect the next batch of frames now and start preprocessing
-                next_frames_buffer = []
-                next_original_frames = []
-                next_ret = True
-
-                if ret:  # only prefetch if video isn't done
-                    while len(next_frames_buffer) < BATCH_SIZE:
-                        next_ret, next_frame = cap.read()
-                        if not next_ret:
-                            break
-                        nf_rgb = cv2.cvtColor(next_frame, cv2.COLOR_BGR2RGB)
-                        nf_pil = Image.fromarray(nf_rgb)
-                        nf_pil.thumbnail((INFERENCE_SIZE, INFERENCE_SIZE))
-                        next_frames_buffer.append(nf_pil)
-                        next_original_frames.append(next_frame)
-
-                    if next_frames_buffer:
-                        pending_inputs = prefetch_executor.submit(
-                            prepare_inputs, next_frames_buffer, processor
-                        )
-                    else:
-                        pending_inputs = None
                 else:
                     pending_inputs = None
+            else:
+                pending_inputs = None
 
                 # ---- GPU INFERENCE ----
                 t0_gpu = time.time()
@@ -659,24 +661,10 @@ def main():
                 )
                 sys.stdout.flush()
 
-                frames_buffer.clear()
-                original_frames.clear()
-
                 # ---- SWAP IN PREFETCHED FRAMES ----
-                if next_frames_buffer:
-                    frames_buffer = next_frames_buffer
-                    original_frames = next_original_frames
-                    ret = next_ret  # propagate EOF status
-
-                    # If we got enough for a full batch, loop back immediately
-                    if len(frames_buffer) == BATCH_SIZE:
-                        continue
-
-            if not ret:
-                # Process any remaining prefetched frames
-                if frames_buffer:
-                    continue
-                break
+                frames_buffer = next_frames_buffer
+                original_frames = next_original_frames
+                ret = next_ret
 
     except KeyboardInterrupt:
         print("\nInterrupted.")

@@ -9,54 +9,53 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db import crud
 from app.models.processing import ProcessingStatusEnum
-from app.services.video_processor import VideoProcessor
-from app.services.signboard_detector import SignBoardDetector
-from app.services.pot_sign_detector import PotSignDetector
+from app.detectors.registry import DETECTOR_REGISTRY
 from app.core.config import processing_status, UPLOAD_DIR
 from app.ws.websocket_manager import manager
 
 logger = logging.getLogger(__name__)
 
 
-class DetectionType(str, Enum):
-    POTHOLE_DETECTION = "pothole-detection"
-    SIGN_BOARD_DETECTION = "sign-board-detection"
-    POT_SIGN_DETECTION = "pot-sign-detection"
+class DetectionMode(str, Enum):
+    """
+    Available detection modes.
+
+    - YOLO     : YOLO-only inference (fast, no VL API calls)
+    - YOLO_VL  : YOLO inference + async VL cross-verification
+    - SAM3     : SAM3-based detection (not yet implemented — stub)
+    """
+
+    YOLO = "yolo"
+    YOLO_VL = "yolo_vl"
+    SAM3 = "sam3"
+
+
+# Keep backward-compatible alias so other internal code can still import DetectionType
+DetectionType = DetectionMode
 
 
 class UploadService:
     def __init__(self):
-        self._pothole_processor = None
-        self._signboard_processor = None
-        self._pot_sign_processor = None
+        # Lazy-loaded detector instances, keyed by DetectionMode value
+        self._processors: dict = {}
 
-    def _get_processor(self, detection_type: DetectionType):
-        """Lazy-load the detector only when first requested"""
-        if detection_type == DetectionType.POTHOLE_DETECTION:
-            if self._pothole_processor is None:
-                logger.info("Loading pothole detector...")
-                self._pothole_processor = VideoProcessor()
-            return self._pothole_processor
-        elif detection_type == DetectionType.SIGN_BOARD_DETECTION:
-            if self._signboard_processor is None:
-                logger.info("Loading signboard detector...")
-                self._signboard_processor = SignBoardDetector()
-            return self._signboard_processor
-        elif detection_type == DetectionType.POT_SIGN_DETECTION:
-            if self._pot_sign_processor is None:
-                logger.info("Loading pot-sign detector...")
-                self._pot_sign_processor = PotSignDetector()
-            return self._pot_sign_processor
-        else:
+    def _get_processor(self, mode: DetectionMode):
+        """Lazy-load the detector only when first requested via registry."""
+        factory = DETECTOR_REGISTRY.get(mode.value)
+        if factory is None:
             raise HTTPException(
-                status_code=400, detail=f"Invalid detection type: {detection_type}"
+                status_code=400, detail=f"Unknown detection mode: {mode}"
             )
+        if mode.value not in self._processors:
+            logger.info(f"Loading detector for mode: {mode.value}")
+            self._processors[mode.value] = factory()
+        return self._processors[mode.value]
 
     async def upload_video(
         self,
         file: UploadFile,
         json_file: UploadFile,
-        detection_type: DetectionType,
+        detection_mode: DetectionMode,
         speed_kmh: int = 30,
         db: Session = Depends(get_db),
     ):
@@ -99,7 +98,7 @@ class UploadService:
                 filename=file.filename,
                 original_path=str(video_path),
                 json_file_path=str(json_path),
-                detection_type=detection_type,
+                detection_type=detection_mode,
                 speed_kmh=speed_kmh,
             )
 
@@ -120,7 +119,7 @@ class UploadService:
         }
 
         # Get processor (lazy-loaded on first use)
-        processor = self._get_processor(detection_type)
+        processor = self._get_processor(detection_mode)
 
         # Start background processing
         asyncio.create_task(
@@ -149,6 +148,7 @@ class UploadService:
         return {
             "video_id": video_id,
             "filename": file.filename,
+            "detection_mode": detection_mode,
             "message": "Video uploaded successfully. Processing started.",
             "status": "queued",
         }

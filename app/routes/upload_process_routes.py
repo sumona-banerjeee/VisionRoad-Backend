@@ -10,9 +10,10 @@ from fastapi import (
 )
 from sqlalchemy.orm import Session
 import asyncio
-from app.services.upload_service import UploadService, DetectionType
+import json
+from app.services.upload_service import UploadService, DetectionMode
 from app.ws.websocket_manager import manager
-from app.core.config import processing_status, detection_results,RESULTS_DIR
+from app.core.config import processing_status, detection_results, RESULTS_DIR
 from app.db.database import get_db
 
 
@@ -25,15 +26,21 @@ upload_service = UploadService()
 async def upload_video(
     file: UploadFile = File(...),
     json_file: UploadFile = File(...),
-    detection_type: DetectionType = Form(DetectionType.POTHOLE_DETECTION),
+    detection_mode: DetectionMode = Form(DetectionMode.YOLO_VL),
     speed_kmh: int = Form(30),
     db: Session = Depends(get_db),
 ):
-    """Upload video and start background processing"""
+    """Upload video and start background processing.
+
+    detection_mode options:
+      - yolo     : YOLO-only (fast, no VL verification)
+      - yolo_vl  : YOLO + VL verification (default)
+      - sam3     : SAM3-based detection (not yet implemented)
+    """
     return await upload_service.upload_video(
         file=file,
         json_file=json_file,
-        detection_type=detection_type,
+        detection_mode=detection_mode,
         speed_kmh=speed_kmh,
         db=db,
     )
@@ -51,12 +58,12 @@ async def get_status(video_id: str):
 async def get_results(video_id: str):
     """Get detection results for a processed video"""
     if video_id not in detection_results:
-            result_file = RESULTS_DIR / f"{video_id}.json"
-            if result_file.exists():
-                with open(result_file, "r") as f:
-                    detection_results[video_id] = json.load(f)
-            else:
-                raise HTTPException(status_code=404, detail="Results not found")
+        result_file = RESULTS_DIR / f"{video_id}.json"
+        if result_file.exists():
+            with open(result_file, "r") as f:
+                detection_results[video_id] = json.load(f)
+        else:
+            raise HTTPException(status_code=404, detail="Results not found")
     return detection_results[video_id]
 
 
@@ -67,8 +74,8 @@ async def list_videos():
     for video_id, status in processing_status.items():
         video_info = {
             "video_id": video_id,
-            "status": status["status"],
-            "progress": status["progress"],
+            "status": status.get("status", "unknown"),
+            "progress": status.get("progress", 0),
         }
 
         if video_id in detection_results:

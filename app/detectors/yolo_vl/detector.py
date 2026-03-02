@@ -1,5 +1,12 @@
 """
-This module processes videos to detect both potholes and signboards using combined model
+YoloVLDetector — YOLO + optional VL verification detector.
+
+Handles two detection modes:
+  - YOLO-only (enable_vl=False): fast inference, no VL verification
+  - YOLO+VL  (enable_vl=True):  YOLO inference with async VL cross-verification
+
+The `enable_vl` flag is set at instantiation time via the registry and overrides
+the ENABLE_VL_VERIFICATION environment variable for per-instance control.
 """
 
 import cv2
@@ -18,7 +25,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from app.services.base_detector import BaseDetector
+from app.detectors.base.base_detector import BaseDetector
 from app.ws.websocket_manager import manager
 from app.core.config import processing_status, detection_results, RESULTS_DIR
 from app.core.logging_config import PerfTimer, perf_logger
@@ -49,8 +56,8 @@ ROAD_DAMAGE_CLASSES = {
 EXCLUDED_CLASSES = {"good_sign_board"}
 ALL_CLASSES = ROAD_DAMAGE_CLASSES | EXCLUDED_CLASSES
 
-# VL Verification Configuration
-ENABLE_VL_VERIFICATION = os.getenv("ENABLE_VL_VERIFICATION", "true").lower() == "true"
+# VL Verification Configuration (env-level defaults; overridden per-instance by enable_vl)
+_ENV_VL_ENABLED = os.getenv("ENABLE_VL_VERIFICATION", "true").lower() == "true"
 VL_MODEL = "qwen3-vl:235b-instruct-cloud"
 VL_IMAGE_MAX_SIZE = 512  # Max dimension for VL input images
 VL_MIN_BBOX_SIZE = 30  # Skip VL for bboxes smaller than this
@@ -107,23 +114,37 @@ def create_ollama_client(api_key):
         return None
 
 
-class PotSignDetector(BaseDetector):
-    def __init__(self):
-        """Initialize combined pot-sign detector with YOLO model"""
+class YoloVLDetector(BaseDetector):
+    """
+    Combined YOLO + optional VL detector.
+
+    Args:
+        enable_vl: Whether to enable VL verification. When False the detector
+                   behaves identically to a YOLO-only mode (faster, no API calls).
+                   Defaults to True (respects ENABLE_VL_VERIFICATION env var).
+    """
+
+    def __init__(self, enable_vl: bool = True):
+        """Initialize detector with YOLO model and optional VL verification."""
         super().__init__(model_path=MODEL_PATH)
+
+        # Instance-level VL flag: enable_vl=False forces VL off regardless of env var
+        self.enable_vl = enable_vl and _ENV_VL_ENABLED
 
         # Load multiple API keys for rotation
         self.api_keys = []
         self.current_key_index = 0
         self.key_lock = None  # Thread-safe rotation
 
-        if ENABLE_VL_VERIFICATION:
+        if self.enable_vl:
             self.api_keys = load_api_keys()
             if self.api_keys:
-                # Import threading only if we have keys
                 import threading
 
                 self.key_lock = threading.Lock()
+
+        mode_label = "YOLO+VL" if self.enable_vl else "YOLO-only"
+        logger.info(f"YoloVLDetector ready — mode: {mode_label}")
 
     def get_next_api_key(self):
         """Get next API key in rotation (thread-safe). Returns (key, key_index) tuple."""
@@ -181,7 +202,7 @@ class PotSignDetector(BaseDetector):
         Returns:
             dict with verification results or None if verification fails/skipped
         """
-        if not self.api_keys or not ENABLE_VL_VERIFICATION:
+        if not self.api_keys or not self.enable_vl:
             return None
 
         x1, y1, x2, y2 = bbox
@@ -324,12 +345,13 @@ class PotSignDetector(BaseDetector):
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             video_duration = total_frames / fps
 
+            mode_label = "YOLO+VL" if self.enable_vl else "YOLO-only"
             logger.info(
-                f"Processing combined pot-sign detection for {video_id}: {total_frames} frames @ {fps:.1f} FPS"
+                f"Processing [{mode_label}] for {video_id}: {total_frames} frames @ {fps:.1f} FPS"
             )
             logger.info(
                 f"Performance settings: FRAME_SKIP={FRAME_SKIP}, YOLO_IMGSZ={YOLO_IMGSZ}, "
-                f"FP16={'ON' if USE_HALF else 'OFF'}, VL={'ASYNC' if ENABLE_VL_VERIFICATION else 'OFF'}"
+                f"FP16={'ON' if USE_HALF else 'OFF'}, VL={'ASYNC' if self.enable_vl else 'OFF'}"
             )
 
             # Adaptive parameters
@@ -379,7 +401,7 @@ class PotSignDetector(BaseDetector):
                     "first_detected_time": round(current_time, 2),
                     "confidence": round(float(conf), 3),
                     "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                    "vl_verified": vl_verified if ENABLE_VL_VERIFICATION else None,
+                    "vl_verified": vl_verified if self.enable_vl else None,
                     "vl_confidence": vl_confidence,
                     "vl_category": vl_category,
                 }
@@ -536,7 +558,8 @@ class PotSignDetector(BaseDetector):
                 frame_data = {"frame_id": frame_count, "detections": []}
 
                 # Process any completed VL futures from previous frames
-                _process_completed_vl_futures()
+                if self.enable_vl:
+                    _process_completed_vl_futures()
 
                 if results[0].boxes.id is not None:
                     track_ids = results[0].boxes.id.cpu().numpy().astype(int)
@@ -609,8 +632,8 @@ class PotSignDetector(BaseDetector):
 
                                 # Submit async VL verification if enabled (capped concurrency)
                                 if (
-                                    self.api_keys
-                                    and ENABLE_VL_VERIFICATION
+                                    self.enable_vl
+                                    and self.api_keys
                                     and tid not in vl_cache
                                     and tid not in pending_vl
                                     and len(pending_vl) < MAX_VL_CONCURRENT
@@ -693,7 +716,7 @@ class PotSignDetector(BaseDetector):
             yolo_end = time.time()
 
             # --- Drain remaining VL futures after video processing ---
-            if pending_vl:
+            if self.enable_vl and pending_vl:
                 logger.info(f"Draining {len(pending_vl)} pending VL futures...")
                 from concurrent.futures import wait
 
@@ -740,7 +763,7 @@ class PotSignDetector(BaseDetector):
             results = {
                 "video_id": video_id,
                 "video_path": video_path,
-                "detection_type": "pot-sign-detection",
+                "detection_mode": "yolo_vl" if self.enable_vl else "yolo",
                 "processed_at": datetime.now().isoformat(),
                 "video_info": {
                     "total_frames": total_frames,
@@ -778,14 +801,14 @@ class PotSignDetector(BaseDetector):
                 },
                 "vl_stats": (
                     {
-                        "enabled": ENABLE_VL_VERIFICATION,
+                        "enabled": self.enable_vl,
                         "total_verified": vl_stats["total_verified"],
                         "verified_success": vl_stats["verified_success"],
                         "verified_failed": vl_stats["verified_failed"],
                         "vl_overrides": vl_stats["vl_overrides"],
                         "cache_hits": vl_stats["skipped"],
                     }
-                    if ENABLE_VL_VERIFICATION
+                    if self.enable_vl
                     else None
                 ),
                 "defected_sign_board_list": defected_sign_board_list,
@@ -839,7 +862,7 @@ class PotSignDetector(BaseDetector):
 
             report_lines = [
                 f"{'=' * 78}",
-                f"  PERF REPORT — [{video_id}]",
+                f"  PERF REPORT — [{video_id}]  mode={'YOLO+VL' if self.enable_vl else 'YOLO-only'}",
                 f"{'=' * 78}",
                 f"  {'Stage':<30} {'Total (s)':>10} {'Count':>7} {'Avg/call (ms)':>15}",
                 f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
@@ -930,7 +953,7 @@ class PotSignDetector(BaseDetector):
                 lat, lng = det.get("lat"), det.get("lng")
                 project_id, package_id, location_id = None, None, None
                 if lat and lng:
-                    # ⏱ Time the GPS-based location DB lookup (potential bottleneck: full table scan)
+                    # ⏱ Time the GPS-based location DB lookup
                     _t0 = time.perf_counter()
                     location = find_location_by_gps(db, lat, lng)
                     _gps_db_elapsed = time.perf_counter() - _t0

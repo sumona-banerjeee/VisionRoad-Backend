@@ -450,143 +450,110 @@ def main():
             else:
                 pending_inputs = None
 
-                # ---- GPU INFERENCE ----
-                t0_gpu = time.time()
-                with (
-                    torch.inference_mode(),
-                    torch.autocast(device_type="cuda", dtype=torch.bfloat16),
-                ):
-                    outputs = model(**inputs)
-                torch.cuda.synchronize()
-                gpu_time = time.time() - t0_gpu
-                acc_gpu_infer += gpu_time
+            # ---- GPU INFERENCE ----
+            t0_gpu = time.time()
+            with (
+                torch.inference_mode(),
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16),
+            ):
+                outputs = model(**inputs)
+            torch.cuda.synchronize()
+            gpu_time = time.time() - t0_gpu
+            acc_gpu_infer += gpu_time
 
-                # ---- POST-PROCESS ----
-                t0_post = time.time()
-                # Use actual thumbnail dims from the PIL images (not original video dims),
-                # and use the snapshot count — frames_buffer may be swapped by prefetch.
-                thumb_h, thumb_w = frames_buffer[0].height, frames_buffer[0].width
-                target_sizes = [(thumb_h, thumb_w)] * (current_batch_size * NUM_PROMPTS)
-                results = processor.post_process_instance_segmentation(
-                    outputs, threshold=BOX_THRESHOLD, target_sizes=target_sizes
+            # ---- POST-PROCESS ----
+            t0_post = time.time()
+            # Use actual thumbnail dims from the PIL images (not original video dims),
+            # and use the snapshot count — frames_buffer may be swapped by prefetch.
+            thumb_h, thumb_w = frames_buffer[0].height, frames_buffer[0].width
+            target_sizes = [(thumb_h, thumb_w)] * (current_batch_size * NUM_PROMPTS)
+            results = processor.post_process_instance_segmentation(
+                outputs, threshold=BOX_THRESHOLD, target_sizes=target_sizes
+            )
+
+            # Free GPU memory early
+            del outputs, inputs
+            torch.cuda.empty_cache()
+
+            for b_idx in range(current_batch_size):
+                global_frame_id = frame_count + b_idx + 1
+                frame_results = results[b_idx * NUM_PROMPTS : (b_idx + 1) * NUM_PROMPTS]
+
+                # --- build manhole exclusion mask ---
+                manhole_res = frame_results[MANHOLE_IDX]
+                manhole_masks = manhole_res["masks"].cpu().numpy()
+                manhole_scores = manhole_res["scores"].float().cpu().numpy()
+                unified_manhole_mask = np.zeros((height, width), dtype=bool)
+                for m, s in zip(manhole_masks, manhole_scores):
+                    if s >= BOX_THRESHOLD:
+                        unified_manhole_mask |= m.astype(bool)
+
+                # --- convert SAM output → sv.Detections ---
+                sv_dets, meta_list = build_sv_detections(
+                    frame_results, height, width, unified_manhole_mask
                 )
 
-                # Free GPU memory early
-                del outputs, inputs
-                torch.cuda.empty_cache()
+                frame_json_dets = []
+                has_detections = sv_dets is not None and len(sv_dets) > 0
 
-                for b_idx in range(current_batch_size):
-                    global_frame_id = frame_count + b_idx + 1
-                    frame_results = results[
-                        b_idx * NUM_PROMPTS : (b_idx + 1) * NUM_PROMPTS
-                    ]
+                # OPT 7: only copy frame if we need to draw on it
+                base_frame = (
+                    original_frames[b_idx].copy()
+                    if has_detections
+                    else original_frames[b_idx]
+                )
 
-                    # --- build manhole exclusion mask ---
-                    manhole_res = frame_results[MANHOLE_IDX]
-                    manhole_masks = manhole_res["masks"].cpu().numpy()
-                    manhole_scores = manhole_res["scores"].float().cpu().numpy()
-                    unified_manhole_mask = np.zeros((height, width), dtype=bool)
-                    for m, s in zip(manhole_masks, manhole_scores):
-                        if s >= BOX_THRESHOLD:
-                            unified_manhole_mask |= m.astype(bool)
+                if has_detections:
+                    tracked_entries = []
 
-                    # --- convert SAM output → sv.Detections ---
-                    sv_dets, meta_list = build_sv_detections(
-                        frame_results, height, width, unified_manhole_mask
-                    )
+                    for p_idx, prompt_name in enumerate(PROMPTS):
+                        if prompt_name == "manhole cover":
+                            continue
 
-                    frame_json_dets = []
-                    has_detections = sv_dets is not None and len(sv_dets) > 0
+                        class_mask = sv_dets.class_id == p_idx
+                        if not class_mask.any():
+                            continue
 
-                    # OPT 7: only copy frame if we need to draw on it
-                    base_frame = (
-                        original_frames[b_idx].copy()
-                        if has_detections
-                        else original_frames[b_idx]
-                    )
+                        class_dets = sv_dets[class_mask]
+                        tracked = trackers[prompt_name].update_with_detections(
+                            class_dets
+                        )
 
-                    if has_detections:
-                        tracked_entries = []
+                        if tracked.tracker_id is None:
+                            continue
 
-                        for p_idx, prompt_name in enumerate(PROMPTS):
-                            if prompt_name == "manhole cover":
-                                continue
-
-                            class_mask = sv_dets.class_id == p_idx
-                            if not class_mask.any():
-                                continue
-
-                            class_dets = sv_dets[class_mask]
-                            tracked = trackers[prompt_name].update_with_detections(
-                                class_dets
+                        for t_idx in range(len(tracked)):
+                            tid = int(tracked.tracker_id[t_idx])
+                            bbox = tracked.xyxy[t_idx]
+                            score = (
+                                float(tracked.confidence[t_idx])
+                                if tracked.confidence is not None
+                                else BOX_THRESHOLD
+                            )
+                            # OPT 5: use cached bboxes for IoU matching
+                            best_mask = match_mask_by_iou(bbox, meta_list, prompt_name)
+                            tracked_entries.append(
+                                (prompt_name, tid, bbox, score, best_mask, p_idx)
                             )
 
-                            if tracked.tracker_id is None:
-                                continue
+                    # --- count + draw ---
+                    for (
+                        prompt_name,
+                        tid,
+                        bbox,
+                        score,
+                        mask_bool,
+                        p_idx,
+                    ) in tracked_entries:
+                        key = PROMPT_IDX_TO_KEY[p_idx]
+                        color = PROMPT_COLOR[p_idx]  # OPT 6: pre-computed
+                        track_key = (prompt_name, tid)
 
-                            for t_idx in range(len(tracked)):
-                                tid = int(tracked.tracker_id[t_idx])
-                                bbox = tracked.xyxy[t_idx]
-                                score = (
-                                    float(tracked.confidence[t_idx])
-                                    if tracked.confidence is not None
-                                    else BOX_THRESHOLD
-                                )
-                                # OPT 5: use cached bboxes for IoU matching
-                                best_mask = match_mask_by_iou(
-                                    bbox, meta_list, prompt_name
-                                )
-                                tracked_entries.append(
-                                    (prompt_name, tid, bbox, score, best_mask, p_idx)
-                                )
-
-                        # --- count + draw ---
-                        for (
-                            prompt_name,
-                            tid,
-                            bbox,
-                            score,
-                            mask_bool,
-                            p_idx,
-                        ) in tracked_entries:
-                            key = PROMPT_IDX_TO_KEY[p_idx]
-                            color = PROMPT_COLOR[p_idx]  # OPT 6: pre-computed
-                            track_key = (prompt_name, tid)
-
-                            if track_key not in seen_tracks:
-                                seen_tracks.add(track_key)
-                                det_id_ctr += 1
-                                defect_counts[key] += 1
-                                cumulative[key] = defect_counts[key]
-
-                                x1, y1, x2, y2 = (
-                                    int(bbox[0]),
-                                    int(bbox[1]),
-                                    int(bbox[2]),
-                                    int(bbox[3]),
-                                )
-                                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-
-                                class_lists[key].append(
-                                    {
-                                        "detection_id": det_id_ctr,
-                                        "type": key,
-                                        "first_detected_frame": global_frame_id,
-                                        "first_detected_time": round(
-                                            global_frame_id / output_fps, 2
-                                        ),
-                                        "confidence": round(score, 3),
-                                        "bbox": {
-                                            "x1": x1,
-                                            "y1": y1,
-                                            "x2": x2,
-                                            "y2": y2,
-                                        },
-                                        "center": {"x": cx, "y": cy},
-                                        "area": (x2 - x1) * (y2 - y1),
-                                        "track_id": tid,
-                                    }
-                                )
+                        if track_key not in seen_tracks:
+                            seen_tracks.add(track_key)
+                            det_id_ctr += 1
+                            defect_counts[key] += 1
+                            cumulative[key] = defect_counts[key]
 
                             x1, y1, x2, y2 = (
                                 int(bbox[0]),
@@ -595,76 +562,105 @@ def main():
                                 int(bbox[3]),
                             )
                             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                            frame_json_dets.append(
+
+                            class_lists[key].append(
                                 {
-                                    "frame_id": global_frame_id,
-                                    "track_id": tid,
+                                    "detection_id": det_id_ctr,
                                     "type": key,
+                                    "first_detected_frame": global_frame_id,
+                                    "first_detected_time": round(
+                                        global_frame_id / output_fps, 2
+                                    ),
                                     "confidence": round(score, 3),
-                                    "count": dict(cumulative),
-                                    "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                                    "bbox": {
+                                        "x1": x1,
+                                        "y1": y1,
+                                        "x2": x2,
+                                        "y2": y2,
+                                    },
                                     "center": {"x": cx, "y": cy},
+                                    "area": (x2 - x1) * (y2 - y1),
+                                    "track_id": tid,
                                 }
                             )
 
-                            label = f"[{tid}] {prompt_name} {score:.2f}"
-                            if mask_bool is not None and mask_bool.any():
-                                draw_mask_overlay(
-                                    base_frame, mask_bool, color, label, colored_layer
-                                )
-                            else:
-                                cv2.rectangle(base_frame, (x1, y1), (x2, y2), color, 2)
-                                cv2.putText(
-                                    base_frame,
-                                    label,
-                                    (x1, y1 - 8),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.55,
-                                    (255, 255, 255),
-                                    2,
-                                )
-
-                    # --- draw manhole (not tracked/counted) ---
-                    need_copy_for_manhole = not has_detections
-                    for m, s in zip(manhole_masks, manhole_scores):
-                        if s < BOX_THRESHOLD:
-                            continue
-                        if need_copy_for_manhole:
-                            base_frame = base_frame.copy()
-                            need_copy_for_manhole = False
-                        mb = m.astype(bool)
-                        color = PROMPT_COLOR[MANHOLE_IDX]
-                        draw_mask_overlay(
-                            base_frame, mb, color, f"manhole {s:.2f}", colored_layer
+                        x1, y1, x2, y2 = (
+                            int(bbox[0]),
+                            int(bbox[1]),
+                            int(bbox[2]),
+                            int(bbox[3]),
                         )
-
-                    if frame_json_dets:
-                        frames_log.append(
+                        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                        frame_json_dets.append(
                             {
                                 "frame_id": global_frame_id,
-                                "detections": frame_json_dets,
+                                "track_id": tid,
+                                "type": key,
+                                "confidence": round(score, 3),
+                                "count": dict(cumulative),
+                                "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                                "center": {"x": cx, "y": cy},
                             }
                         )
 
-                    # OPT 2: non-blocking write via threaded writer
-                    out.write(base_frame)
+                        label = f"[{tid}] {prompt_name} {score:.2f}"
+                        if mask_bool is not None and mask_bool.any():
+                            draw_mask_overlay(
+                                base_frame, mask_bool, color, label, colored_layer
+                            )
+                        else:
+                            cv2.rectangle(base_frame, (x1, y1), (x2, y2), color, 2)
+                            cv2.putText(
+                                base_frame,
+                                label,
+                                (x1, y1 - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.55,
+                                (255, 255, 255),
+                                2,
+                            )
 
-                frame_count += current_batch_size
-                post_time = time.time() - t0_post
-                acc_post_draw += post_time
+                # --- draw manhole (not tracked/counted) ---
+                need_copy_for_manhole = not has_detections
+                for m, s in zip(manhole_masks, manhole_scores):
+                    if s < BOX_THRESHOLD:
+                        continue
+                    if need_copy_for_manhole:
+                        base_frame = base_frame.copy()
+                        need_copy_for_manhole = False
+                    mb = m.astype(bool)
+                    color = PROMPT_COLOR[MANHOLE_IDX]
+                    draw_mask_overlay(
+                        base_frame, mb, color, f"manhole {s:.2f}", colored_layer
+                    )
 
-                active_counts = {k: v for k, v in defect_counts.items() if v > 0}
-                sys.stdout.write(
-                    f"\rFrame: {frame_count}/{total} | "
-                    f"GPU: {gpu_time:.3f}s | Prep: {cpu_prep_time:.3f}s | "
-                    f"Draw: {post_time:.3f}s | {active_counts}  "
-                )
-                sys.stdout.flush()
+                if frame_json_dets:
+                    frames_log.append(
+                        {
+                            "frame_id": global_frame_id,
+                            "detections": frame_json_dets,
+                        }
+                    )
 
-                # ---- SWAP IN PREFETCHED FRAMES ----
-                frames_buffer = next_frames_buffer
-                original_frames = next_original_frames
-                ret = next_ret
+                # OPT 2: non-blocking write via threaded writer
+                out.write(base_frame)
+
+            frame_count += current_batch_size
+            post_time = time.time() - t0_post
+            acc_post_draw += post_time
+
+            active_counts = {k: v for k, v in defect_counts.items() if v > 0}
+            sys.stdout.write(
+                f"\rFrame: {frame_count}/{total} | "
+                f"GPU: {gpu_time:.3f}s | Prep: {cpu_prep_time:.3f}s | "
+                f"Draw: {post_time:.3f}s | {active_counts}  "
+            )
+            sys.stdout.flush()
+
+            # ---- SWAP IN PREFETCHED FRAMES ----
+            frames_buffer = next_frames_buffer
+            original_frames = next_original_frames
+            ret = next_ret
 
     except KeyboardInterrupt:
         print("\nInterrupted.")

@@ -463,10 +463,9 @@ def main():
 
             # ---- POST-PROCESS ----
             t0_post = time.time()
-            # Use actual thumbnail dims from the PIL images (not original video dims),
-            # and use the snapshot count — frames_buffer may be swapped by prefetch.
-            thumb_h, thumb_w = frames_buffer[0].height, frames_buffer[0].width
-            target_sizes = [(thumb_h, thumb_w)] * (current_batch_size * NUM_PROMPTS)
+            # target_sizes must match the ORIGINAL video dims (for drawing),
+            # and use current_batch_size (not len(frames_buffer) which may be swapped).
+            target_sizes = [(height, width)] * (current_batch_size * NUM_PROMPTS)
             results = processor.post_process_instance_segmentation(
                 outputs, threshold=BOX_THRESHOLD, target_sizes=target_sizes
             )

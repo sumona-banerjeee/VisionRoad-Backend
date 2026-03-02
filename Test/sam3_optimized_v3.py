@@ -502,86 +502,60 @@ def main():
                     else original_frames[b_idx]
                 )
 
-                if has_detections:
-                    tracked_entries = []
+                tracked_entries = []
 
-                    for p_idx, prompt_name in enumerate(PROMPTS):
-                        if prompt_name == "manhole cover":
-                            continue
+                for p_idx, prompt_name in enumerate(PROMPTS):
+                    if prompt_name == "manhole cover":
+                        continue
 
-                        class_mask = sv_dets.class_id == p_idx
-                        if not class_mask.any():
-                            continue
-
+                    class_mask = (
+                        sv_dets.class_id == p_idx
+                        if sv_dets is not None and len(sv_dets) > 0
+                        else np.array([], dtype=bool)
+                    )
+                    if sv_dets is not None and class_mask.any():
                         class_dets = sv_dets[class_mask]
-                        tracked = trackers[prompt_name].update_with_detections(
-                            class_dets
+                    else:
+                        # Feed empty detections so ByteTrack can age out stale tracks
+                        class_dets = sv.Detections.empty()
+
+                    tracked = trackers[prompt_name].update_with_detections(class_dets)
+
+                    if tracked.tracker_id is None or len(tracked) == 0:
+                        continue
+
+                    for t_idx in range(len(tracked)):
+                        tid = int(tracked.tracker_id[t_idx])
+                        bbox = tracked.xyxy[t_idx]
+                        score = (
+                            float(tracked.confidence[t_idx])
+                            if tracked.confidence is not None
+                            else BOX_THRESHOLD
+                        )
+                        # OPT 5: use cached bboxes for IoU matching
+                        best_mask = match_mask_by_iou(bbox, meta_list, prompt_name)
+                        tracked_entries.append(
+                            (prompt_name, tid, bbox, score, best_mask, p_idx)
                         )
 
-                        if tracked.tracker_id is None:
-                            continue
+                # --- count + draw ---
+                for (
+                    prompt_name,
+                    tid,
+                    bbox,
+                    score,
+                    mask_bool,
+                    p_idx,
+                ) in tracked_entries:
+                    key = PROMPT_IDX_TO_KEY[p_idx]
+                    color = PROMPT_COLOR[p_idx]  # OPT 6: pre-computed
+                    track_key = (prompt_name, tid)
 
-                        for t_idx in range(len(tracked)):
-                            tid = int(tracked.tracker_id[t_idx])
-                            bbox = tracked.xyxy[t_idx]
-                            score = (
-                                float(tracked.confidence[t_idx])
-                                if tracked.confidence is not None
-                                else BOX_THRESHOLD
-                            )
-                            # OPT 5: use cached bboxes for IoU matching
-                            best_mask = match_mask_by_iou(bbox, meta_list, prompt_name)
-                            tracked_entries.append(
-                                (prompt_name, tid, bbox, score, best_mask, p_idx)
-                            )
-
-                    # --- count + draw ---
-                    for (
-                        prompt_name,
-                        tid,
-                        bbox,
-                        score,
-                        mask_bool,
-                        p_idx,
-                    ) in tracked_entries:
-                        key = PROMPT_IDX_TO_KEY[p_idx]
-                        color = PROMPT_COLOR[p_idx]  # OPT 6: pre-computed
-                        track_key = (prompt_name, tid)
-
-                        if track_key not in seen_tracks:
-                            seen_tracks.add(track_key)
-                            det_id_ctr += 1
-                            defect_counts[key] += 1
-                            cumulative[key] = defect_counts[key]
-
-                            x1, y1, x2, y2 = (
-                                int(bbox[0]),
-                                int(bbox[1]),
-                                int(bbox[2]),
-                                int(bbox[3]),
-                            )
-                            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-
-                            class_lists[key].append(
-                                {
-                                    "detection_id": det_id_ctr,
-                                    "type": key,
-                                    "first_detected_frame": global_frame_id,
-                                    "first_detected_time": round(
-                                        global_frame_id / output_fps, 2
-                                    ),
-                                    "confidence": round(score, 3),
-                                    "bbox": {
-                                        "x1": x1,
-                                        "y1": y1,
-                                        "x2": x2,
-                                        "y2": y2,
-                                    },
-                                    "center": {"x": cx, "y": cy},
-                                    "area": (x2 - x1) * (y2 - y1),
-                                    "track_id": tid,
-                                }
-                            )
+                    if track_key not in seen_tracks:
+                        seen_tracks.add(track_key)
+                        det_id_ctr += 1
+                        defect_counts[key] += 1
+                        cumulative[key] = defect_counts[key]
 
                         x1, y1, x2, y2 = (
                             int(bbox[0]),
@@ -590,34 +564,63 @@ def main():
                             int(bbox[3]),
                         )
                         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                        frame_json_dets.append(
+
+                        class_lists[key].append(
                             {
-                                "frame_id": global_frame_id,
-                                "track_id": tid,
+                                "detection_id": det_id_ctr,
                                 "type": key,
+                                "first_detected_frame": global_frame_id,
+                                "first_detected_time": round(
+                                    global_frame_id / output_fps, 2
+                                ),
                                 "confidence": round(score, 3),
-                                "count": dict(cumulative),
-                                "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                                "bbox": {
+                                    "x1": x1,
+                                    "y1": y1,
+                                    "x2": x2,
+                                    "y2": y2,
+                                },
                                 "center": {"x": cx, "y": cy},
+                                "area": (x2 - x1) * (y2 - y1),
+                                "track_id": tid,
                             }
                         )
 
-                        label = f"[{tid}] {prompt_name} {score:.2f}"
-                        if mask_bool is not None and mask_bool.any():
-                            draw_mask_overlay(
-                                base_frame, mask_bool, color, label, colored_layer
-                            )
-                        else:
-                            cv2.rectangle(base_frame, (x1, y1), (x2, y2), color, 2)
-                            cv2.putText(
-                                base_frame,
-                                label,
-                                (x1, y1 - 8),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.55,
-                                (255, 255, 255),
-                                2,
-                            )
+                    x1, y1, x2, y2 = (
+                        int(bbox[0]),
+                        int(bbox[1]),
+                        int(bbox[2]),
+                        int(bbox[3]),
+                    )
+                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                    frame_json_dets.append(
+                        {
+                            "frame_id": global_frame_id,
+                            "track_id": tid,
+                            "type": key,
+                            "confidence": round(score, 3),
+                            "count": dict(cumulative),
+                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                            "center": {"x": cx, "y": cy},
+                        }
+                    )
+
+                    label = f"[{tid}] {prompt_name} {score:.2f}"
+                    if mask_bool is not None and mask_bool.any():
+                        draw_mask_overlay(
+                            base_frame, mask_bool, color, label, colored_layer
+                        )
+                    else:
+                        cv2.rectangle(base_frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(
+                            base_frame,
+                            label,
+                            (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.55,
+                            (255, 255, 255),
+                            2,
+                        )
 
                 # --- draw manhole (not tracked/counted) ---
                 need_copy_for_manhole = not has_detections

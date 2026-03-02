@@ -215,16 +215,22 @@ def draw_mask_overlay(base_frame, mask_bool, color, label_text, colored_layer):
     masked_color = cv2.bitwise_and(colored_layer, colored_layer, mask=mask_uint8)
     cv2.addWeighted(base_frame, 1.0, masked_color, 0.5, 0, dst=base_frame)  # in-place
 
-    contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(
+        mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
     cv2.drawContours(base_frame, contours, -1, color, 2)
 
     if contours:
         c = max(contours, key=cv2.contourArea)
         extTop = tuple(c[c[:, :, 1].argmin()][0])
         cv2.putText(
-            base_frame, label_text,
+            base_frame,
+            label_text,
             (extTop[0], extTop[1] - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            2,
         )
 
 
@@ -368,8 +374,8 @@ def main():
     acc_gpu_infer = 0.0
     acc_post_draw = 0.0
 
-    frames_buffer = []       # PIL images for processor
-    original_frames = []     # raw BGR frames for drawing
+    frames_buffer = []  # PIL images for processor
+    original_frames = []  # raw BGR frames for drawing
 
     # OPT 4: Pre-allocate drawing buffer (reused every frame)
     colored_layer = np.zeros((height, width, 3), dtype=np.uint8)
@@ -400,11 +406,18 @@ def main():
 
                 # OPT: non-blocking transfer with pinned memory
                 inputs = {
-                    k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                    k: (
+                        v.to(device, non_blocking=True)
+                        if isinstance(v, torch.Tensor)
+                        else v
+                    )
                     for k, v in inputs.items()
                 }
                 if inputs["pixel_values"].dtype != torch.bfloat16:
                     inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
+
+                # Snapshot batch size BEFORE any prefetch swap
+                current_batch_size = len(frames_buffer)
 
                 cpu_prep_time = time.time() - t0_cpu
                 acc_cpu_prep += cpu_prep_time
@@ -448,8 +461,10 @@ def main():
 
                 # ---- POST-PROCESS ----
                 t0_post = time.time()
-                num_items = len(frames_buffer) * NUM_PROMPTS
-                target_sizes = [(height, width)] * num_items
+                # Use actual thumbnail dims from the PIL images (not original video dims),
+                # and use the snapshot count — frames_buffer may be swapped by prefetch.
+                thumb_h, thumb_w = frames_buffer[0].height, frames_buffer[0].width
+                target_sizes = [(thumb_h, thumb_w)] * (current_batch_size * NUM_PROMPTS)
                 results = processor.post_process_instance_segmentation(
                     outputs, threshold=BOX_THRESHOLD, target_sizes=target_sizes
                 )
@@ -458,9 +473,11 @@ def main():
                 del outputs, inputs
                 torch.cuda.empty_cache()
 
-                for b_idx in range(len(frames_buffer)):
+                for b_idx in range(current_batch_size):
                     global_frame_id = frame_count + b_idx + 1
-                    frame_results = results[b_idx * NUM_PROMPTS : (b_idx + 1) * NUM_PROMPTS]
+                    frame_results = results[
+                        b_idx * NUM_PROMPTS : (b_idx + 1) * NUM_PROMPTS
+                    ]
 
                     # --- build manhole exclusion mask ---
                     manhole_res = frame_results[MANHOLE_IDX]
@@ -480,7 +497,11 @@ def main():
                     has_detections = sv_dets is not None and len(sv_dets) > 0
 
                     # OPT 7: only copy frame if we need to draw on it
-                    base_frame = original_frames[b_idx].copy() if has_detections else original_frames[b_idx]
+                    base_frame = (
+                        original_frames[b_idx].copy()
+                        if has_detections
+                        else original_frames[b_idx]
+                    )
 
                     if has_detections:
                         tracked_entries = []
@@ -494,7 +515,9 @@ def main():
                                 continue
 
                             class_dets = sv_dets[class_mask]
-                            tracked = trackers[prompt_name].update_with_detections(class_dets)
+                            tracked = trackers[prompt_name].update_with_detections(
+                                class_dets
+                            )
 
                             if tracked.tracker_id is None:
                                 continue
@@ -508,11 +531,22 @@ def main():
                                     else BOX_THRESHOLD
                                 )
                                 # OPT 5: use cached bboxes for IoU matching
-                                best_mask = match_mask_by_iou(bbox, meta_list, prompt_name)
-                                tracked_entries.append((prompt_name, tid, bbox, score, best_mask, p_idx))
+                                best_mask = match_mask_by_iou(
+                                    bbox, meta_list, prompt_name
+                                )
+                                tracked_entries.append(
+                                    (prompt_name, tid, bbox, score, best_mask, p_idx)
+                                )
 
                         # --- count + draw ---
-                        for prompt_name, tid, bbox, score, mask_bool, p_idx in tracked_entries:
+                        for (
+                            prompt_name,
+                            tid,
+                            bbox,
+                            score,
+                            mask_bool,
+                            p_idx,
+                        ) in tracked_entries:
                             key = PROMPT_IDX_TO_KEY[p_idx]
                             color = PROMPT_COLOR[p_idx]  # OPT 6: pre-computed
                             track_key = (prompt_name, tid)
@@ -523,41 +557,69 @@ def main():
                                 defect_counts[key] += 1
                                 cumulative[key] = defect_counts[key]
 
-                                x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                                x1, y1, x2, y2 = (
+                                    int(bbox[0]),
+                                    int(bbox[1]),
+                                    int(bbox[2]),
+                                    int(bbox[3]),
+                                )
                                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
 
-                                class_lists[key].append({
-                                    "detection_id": det_id_ctr,
+                                class_lists[key].append(
+                                    {
+                                        "detection_id": det_id_ctr,
+                                        "type": key,
+                                        "first_detected_frame": global_frame_id,
+                                        "first_detected_time": round(
+                                            global_frame_id / output_fps, 2
+                                        ),
+                                        "confidence": round(score, 3),
+                                        "bbox": {
+                                            "x1": x1,
+                                            "y1": y1,
+                                            "x2": x2,
+                                            "y2": y2,
+                                        },
+                                        "center": {"x": cx, "y": cy},
+                                        "area": (x2 - x1) * (y2 - y1),
+                                        "track_id": tid,
+                                    }
+                                )
+
+                            x1, y1, x2, y2 = (
+                                int(bbox[0]),
+                                int(bbox[1]),
+                                int(bbox[2]),
+                                int(bbox[3]),
+                            )
+                            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                            frame_json_dets.append(
+                                {
+                                    "frame_id": global_frame_id,
+                                    "track_id": tid,
                                     "type": key,
-                                    "first_detected_frame": global_frame_id,
-                                    "first_detected_time": round(global_frame_id / output_fps, 2),
                                     "confidence": round(score, 3),
+                                    "count": dict(cumulative),
                                     "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                                     "center": {"x": cx, "y": cy},
-                                    "area": (x2 - x1) * (y2 - y1),
-                                    "track_id": tid,
-                                })
-
-                            x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
-                            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                            frame_json_dets.append({
-                                "frame_id": global_frame_id,
-                                "track_id": tid,
-                                "type": key,
-                                "confidence": round(score, 3),
-                                "count": dict(cumulative),
-                                "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                                "center": {"x": cx, "y": cy},
-                            })
+                                }
+                            )
 
                             label = f"[{tid}] {prompt_name} {score:.2f}"
                             if mask_bool is not None and mask_bool.any():
-                                draw_mask_overlay(base_frame, mask_bool, color, label, colored_layer)
+                                draw_mask_overlay(
+                                    base_frame, mask_bool, color, label, colored_layer
+                                )
                             else:
                                 cv2.rectangle(base_frame, (x1, y1), (x2, y2), color, 2)
                                 cv2.putText(
-                                    base_frame, label, (x1, y1 - 8),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
+                                    base_frame,
+                                    label,
+                                    (x1, y1 - 8),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.55,
+                                    (255, 255, 255),
+                                    2,
                                 )
 
                     # --- draw manhole (not tracked/counted) ---
@@ -570,18 +632,22 @@ def main():
                             need_copy_for_manhole = False
                         mb = m.astype(bool)
                         color = PROMPT_COLOR[MANHOLE_IDX]
-                        draw_mask_overlay(base_frame, mb, color, f"manhole {s:.2f}", colored_layer)
+                        draw_mask_overlay(
+                            base_frame, mb, color, f"manhole {s:.2f}", colored_layer
+                        )
 
                     if frame_json_dets:
-                        frames_log.append({
-                            "frame_id": global_frame_id,
-                            "detections": frame_json_dets,
-                        })
+                        frames_log.append(
+                            {
+                                "frame_id": global_frame_id,
+                                "detections": frame_json_dets,
+                            }
+                        )
 
                     # OPT 2: non-blocking write via threaded writer
                     out.write(base_frame)
 
-                frame_count += len(frames_buffer)
+                frame_count += current_batch_size
                 post_time = time.time() - t0_post
                 acc_post_draw += post_time
 
@@ -663,8 +729,12 @@ def main():
     t_total_elapsed = time.time() - t_total_start
     acc_other = max(
         0,
-        t_total_elapsed - t_model_load - acc_cpu_prep - acc_gpu_infer
-        - acc_post_draw - t_json_write,
+        t_total_elapsed
+        - t_model_load
+        - acc_cpu_prep
+        - acc_gpu_infer
+        - acc_post_draw
+        - t_json_write,
     )
 
     W = 60
@@ -692,7 +762,9 @@ def main():
     print(f"  {'TOTAL WALL TIME':<40} {t_total_elapsed:>7.1f}s")
     per_frame = t_total_elapsed / frame_count if frame_count else 0
     print(f"  {'Per Frame (avg)':<40} {per_frame:>7.3f}s")
-    print(f"  {'Effective FPS processed':<40} {1 / per_frame if per_frame else 0:>7.2f}")
+    print(
+        f"  {'Effective FPS processed':<40} {1 / per_frame if per_frame else 0:>7.2f}"
+    )
     print(f"{'=' * W}")
     print(f"  📹  Video  → {OUTPUT_VIDEO}")
     print(f"  📄  Report → {OUTPUT_JSON}")

@@ -287,11 +287,8 @@ def draw_detection(frame, x1, y1, x2, y2, label, color, verified=None):
     border_thickness = 3 if verified is True else 1
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, border_thickness)
 
-    # Only append SAM3 badge once we have a result; no "PENDING" noise
-    if verified is True:
-        full_label = f"{label}  SAM3 \u2713"
-    else:
-        full_label = label  # awaiting SAM3 - just show class + confidence
+    # Label is always just the YOLO output — no SAM3 text
+    full_label = label
 
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.52

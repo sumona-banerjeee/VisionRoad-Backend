@@ -26,13 +26,15 @@ class BaseDetector:
         try:
             logger.info(f"Loading model {self.model_path} on device: {self.device}")
             self.model = YOLO(self.model_path)
+            # NOTE: do NOT call model.to(device) + model.half() here.
+            # Ultralytics runs Conv+BN fusion (fuse()) on the first predict/track call
+            # and requires FP32 weights at that point. FP16 is applied correctly via
+            # half=USE_HALF in every model.track() call inside _process_video_blocking.
             if self.device.startswith("cuda"):
-                self.model.to(self.device)
-                self.model.model.half()  # FP16 — ~1.5x faster, no accuracy loss
                 gpu_name = torch.cuda.get_device_name(0)
                 vram = torch.cuda.get_device_properties(0).total_memory / 1e9
                 logger.info(
-                    f"Model loaded on GPU: {gpu_name} ({vram:.1f} GB VRAM) — FP16 enabled"
+                    f"Model will run on GPU: {gpu_name} ({vram:.1f} GB VRAM) — FP16 via track(half=True)"
                 )
             else:
                 logger.info("Model loaded on CPU (FP32)")

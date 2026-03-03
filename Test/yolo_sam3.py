@@ -303,9 +303,9 @@ def run(video_path: str):
     # ── Load models ──────────────────────────────────────────────────────────
     logger.info(f"Loading YOLO from {YOLO_MODEL_PATH} …")
     yolo = YOLO(YOLO_MODEL_PATH)
-    if device.startswith("cuda"):
-        yolo.to(device)
-        yolo.model.half()
+    # NOTE: do NOT call yolo.model.half() here — Ultralytics runs Conv+BN fusion
+    # (fuse()) on the first track() call and it requires FP32 weights at that point.
+    # FP16 inference is enabled by passing half=True directly to yolo.track() below.
     logger.info("YOLO ready.")
 
     verifier = Sam3Verifier(device=device)

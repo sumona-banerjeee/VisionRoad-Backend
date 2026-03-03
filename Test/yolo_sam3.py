@@ -63,6 +63,16 @@ FRAME_SKIP = int(os.getenv("FRAME_SKIP", "2"))
 # SAM3 settings
 SAM3_MODEL_ID = "facebook/sam3"
 SAM3_VERIFY_THRESHOLD = float(os.getenv("SAM3_VERIFY_THRESHOLD", "0.55"))
+
+# Per-class thresholds — override SAM3_VERIFY_THRESHOLD for harder-to-segment classes
+# defected_sign_board and road_crack are geometrically subtle; lower bar needed
+SAM3_CLASS_THRESHOLDS = {
+    "pothole": float(os.getenv("SAM3_THR_POTHOLE", "0.55")),
+    "road_crack": float(os.getenv("SAM3_THR_ROAD_CRACK", "0.45")),
+    "defected_sign_board": float(os.getenv("SAM3_THR_DEFECTED_SIGN", "0.40")),
+    "good_sign_board": float(os.getenv("SAM3_THR_GOOD_SIGN", "0.55")),
+    "damaged_road_marking": float(os.getenv("SAM3_THR_DAMAGED_MARKING", "0.55")),
+}
 SAM3_MIN_BBOX_SIZE = int(os.getenv("SAM3_MIN_BBOX_SIZE", "30"))
 SAM3_CROP_MAX_SIZE = 512  # resize crop before SAM3 inference
 HF_TOKEN = os.getenv("HF_TOKEN", "")
@@ -159,6 +169,18 @@ class Sam3Verifier:
 
         self.processor = Sam3Processor.from_pretrained(SAM3_MODEL_ID)
         logger.info(f"✅ SAM3 loaded in {time.time() - t0:.1f}s")
+        self._warmup()
+
+    def _warmup(self):
+        """Prime CUDA kernels with a tiny synthetic crop so the first real
+        verify() call is not penalised by CUDA JIT compilation (~3-4s spike)."""
+        logger.info("SAM3 warmup — priming CUDA kernels …")
+        try:
+            dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+            self.verify(dummy, "pothole")
+            logger.info("SAM3 warmup done.")
+        except Exception as e:
+            logger.warning(f"SAM3 warmup failed (non-fatal): {e}")
 
     @torch.inference_mode()
     def verify(self, crop_bgr: np.ndarray, yolo_class: str) -> dict:
@@ -176,6 +198,9 @@ class Sam3Verifier:
 
         best_score = 0.0
         best_prompt = "none"
+
+        # Use per-class threshold if defined, else fall back to global
+        threshold = SAM3_CLASS_THRESHOLDS.get(yolo_class, SAM3_VERIFY_THRESHOLD)
 
         for prompt_text in prompts:
             try:
@@ -201,8 +226,8 @@ class Sam3Verifier:
 
                 results = self.processor.post_process_instance_segmentation(
                     outputs,
-                    threshold=SAM3_VERIFY_THRESHOLD
-                    * 0.8,  # looser threshold at post-process
+                    threshold=threshold
+                    * 0.75,  # looser at post-process, check against class threshold below
                     target_sizes=[(pil_img.height, pil_img.width)],
                 )
 
@@ -219,14 +244,14 @@ class Sam3Verifier:
             except Exception as e:
                 logger.warning(f"SAM3 verify error for prompt '{prompt_text}': {e}")
 
-        agrees = best_score >= SAM3_VERIFY_THRESHOLD
+        agrees = best_score >= threshold
         elapsed = time.time() - t0
 
         icon = "✓" if agrees else "✗"
         logger.info(
             f"SAM3 {icon} [{elapsed:.2f}s] yolo={yolo_class!r} "
             f"best_prompt={best_prompt!r} score={best_score:.3f} "
-            f"threshold={SAM3_VERIFY_THRESHOLD}"
+            f"threshold={threshold}"
         )
         return {
             "sam3_agrees": agrees,
@@ -255,23 +280,49 @@ def is_spatial_duplicate(cx, cy, cls, now, spatial_locations, time_thresh, dist_
 
 
 def draw_detection(frame, x1, y1, x2, y2, label, color, verified=None):
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    # Verification badge
+    # Bbox border encodes verification state:
+    #   verified=True  → thick (3px)  = SAM3 confirmed
+    #   verified=None  → thin (1px)  = SAM3 still running in background
+    #   verified=False → never drawn  (rejected detections are removed from confirmed)
+    border_thickness = 3 if verified is True else 1
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, border_thickness)
+
+    # Only append SAM3 badge once we have a result; no "PENDING" noise
     if verified is True:
-        badge, badge_color = "SAM3✓", (0, 200, 0)
-    elif verified is False:
-        badge, badge_color = "SAM3✗", (0, 0, 200)
+        full_label = f"{label}  SAM3 \u2713"
     else:
-        badge, badge_color = "PENDING", (200, 200, 0)
-    full_label = f"{label} [{badge}]"
+        full_label = label  # awaiting SAM3 - just show class + confidence
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.52
+    thickness = 1
+    (tw, th), baseline = cv2.getTextSize(full_label, font, font_scale, thickness)
+
+    # Choose Y so the label box stays inside the frame
+    label_y = y1 - 6 if y1 - 6 - th - baseline - 2 >= 0 else y2 + th + baseline + 6
+    lx1 = x1
+    ly1 = label_y - th - baseline - 2
+    lx2 = x1 + tw + 6
+    ly2 = label_y + baseline
+
+    # Dark semi-opaque background for readability
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (lx1, ly1), (lx2, ly2), (20, 20, 20), cv2.FILLED)
+    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+
+    # Coloured top-border strip matching bbox colour (class indicator)
+    cv2.rectangle(frame, (lx1, ly1), (lx2, ly1 + 2), color, cv2.FILLED)
+
+    # White text — always readable on dark background
     cv2.putText(
         frame,
         full_label,
-        (x1, max(y1 - 8, 12)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        badge_color,
-        2,
+        (lx1 + 3, label_y - 2),
+        font,
+        font_scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
     )
 
 

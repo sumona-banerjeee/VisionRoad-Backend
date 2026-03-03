@@ -1,12 +1,11 @@
 """
-YoloVLDetector — YOLO + optional VL verification detector.
+YoloDetector — Pure YOLO detection with optional verification callback.
 
-Handles two detection modes:
-  - YOLO-only (enable_vl=False): fast inference, no VL verification
-  - YOLO+VL  (enable_vl=True):  YOLO inference with async VL cross-verification
-
-The `enable_vl` flag is set at instantiation time via the registry and overrides
-the ENABLE_VL_VERIFICATION environment variable for per-instance control.
+The detector focuses solely on YOLO inference, tracking, and deduplication.
+An optional `verify_fn` callback can be provided to add post-detection
+verification (e.g., VL verification). The callback is invoked asynchronously
+during frame processing and its results are used to confirm, override,
+or reject detections.
 """
 
 import cv2
@@ -16,8 +15,6 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 import time
 import logging
 import torch
-import ollama
-import base64
 import os
 from datetime import datetime
 from collections import defaultdict, deque
@@ -56,106 +53,31 @@ ROAD_DAMAGE_CLASSES = {
 EXCLUDED_CLASSES = {"good_sign_board"}
 ALL_CLASSES = ROAD_DAMAGE_CLASSES | EXCLUDED_CLASSES
 
-# VL Verification Configuration (env-level defaults; overridden per-instance by enable_vl)
-_ENV_VL_ENABLED = os.getenv("ENABLE_VL_VERIFICATION", "true").lower() == "true"
-VL_MODEL = "qwen3-vl:235b-instruct-cloud"
-VL_IMAGE_MAX_SIZE = 512  # Max dimension for VL input images
-VL_MIN_BBOX_SIZE = 30  # Skip VL for bboxes smaller than this
-VL_TIMEOUT = int(os.getenv("VL_TIMEOUT_SECONDS", "30"))  # Hard timeout
-MAX_VL_CONCURRENT = int(os.getenv("MAX_VL_CONCURRENT", "4"))  # Max parallel VL calls
-
-# Two separate pools to avoid self-deadlock:
-# 1) _vl_timeout_executor: used INSIDE verify_detection_with_vl for timeout enforcement
-# 2) _async_vl_executor: used OUTSIDE in the frame loop for async VL submissions
-_vl_timeout_executor = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="vl_timeout"
-)
-_async_vl_executor = ThreadPoolExecutor(
-    max_workers=MAX_VL_CONCURRENT, thread_name_prefix="vl_async"
+# Async verification config
+MAX_VERIFY_CONCURRENT = int(os.getenv("MAX_VL_CONCURRENT", "4"))
+_async_verify_executor = ThreadPoolExecutor(
+    max_workers=MAX_VERIFY_CONCURRENT, thread_name_prefix="verify_async"
 )
 
 
-def load_api_keys():
-    """Load all available API keys from environment variables"""
-    api_keys = []
-    i = 1
-
-    # Try to load numbered API keys (OLLAMA_API_KEY_1, OLLAMA_API_KEY_2, etc.)
-    while True:
-        key = os.getenv(f"OLLAMA_API_KEY_{i}")
-        if not key:
-            break
-        api_keys.append(key)
-        i += 1
-
-    # Fallback to single key if numbered keys not found
-    if not api_keys:
-        single_key = os.getenv("OLLAMA_API_KEY")
-        if single_key:
-            api_keys.append(single_key)
-
-    if api_keys:
-        logger.info(f"Loaded {len(api_keys)} API key(s) for VL verification")
-    else:
-        logger.warning("No API keys found. VL verification will be disabled.")
-
-    return api_keys
-
-
-def create_ollama_client(api_key):
-    """Create Ollama client with given API key"""
-    try:
-        client = ollama.Client(
-            host="https://ollama.com", headers={"Authorization": f"Bearer {api_key}"}
-        )
-        return client
-    except Exception as e:
-        logger.error(f"Failed to create Ollama client: {e}")
-        return None
-
-
-class YoloVLDetector(BaseDetector):
+class YoloDetector(BaseDetector):
     """
-    Combined YOLO + optional VL detector.
+    Pure YOLO detector with optional verification callback.
 
     Args:
-        enable_vl: Whether to enable VL verification. When False the detector
-                   behaves identically to a YOLO-only mode (faster, no API calls).
-                   Defaults to True (respects ENABLE_VL_VERIFICATION env var).
+        verify_fn: Optional callable(frame, bbox, predicted_class) -> dict | None.
+                   If provided, it is called asynchronously to verify each detection.
+        detection_mode: String label for the detection mode (e.g. "yolo", "yolo_vl", "sam3").
     """
 
-    def __init__(self, enable_vl: bool = True):
-        """Initialize detector with YOLO model and optional VL verification."""
+    def __init__(self, verify_fn=None, detection_mode="yolo"):
+        """Initialize detector with YOLO model and optional verification callback."""
         super().__init__(model_path=MODEL_PATH)
+        self.verify_fn = verify_fn
+        self.detection_mode = detection_mode
 
-        # Instance-level VL flag: enable_vl=False forces VL off regardless of env var
-        self.enable_vl = enable_vl and _ENV_VL_ENABLED
-
-        # Load multiple API keys for rotation
-        self.api_keys = []
-        self.current_key_index = 0
-        self.key_lock = None  # Thread-safe rotation
-
-        if self.enable_vl:
-            self.api_keys = load_api_keys()
-            if self.api_keys:
-                import threading
-
-                self.key_lock = threading.Lock()
-
-        mode_label = "YOLO+VL" if self.enable_vl else "YOLO-only"
-        logger.info(f"YoloVLDetector ready — mode: {mode_label}")
-
-    def get_next_api_key(self):
-        """Get next API key in rotation (thread-safe). Returns (key, key_index) tuple."""
-        if not self.api_keys:
-            return None, None
-
-        with self.key_lock:
-            index = self.current_key_index
-            key = self.api_keys[index]
-            self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-            return key, index + 1  # 1-based index for human-readable logs
+        mode_label = f"YOLO+verify ({self.detection_mode})" if self.verify_fn else "YOLO-only"
+        logger.info(f"YoloDetector ready — mode: {mode_label}")
 
     @staticmethod
     def calculate_distance(p1, p2):
@@ -190,127 +112,10 @@ class YoloVLDetector(BaseDetector):
                 return True, reason
         return False, None
 
-    def verify_detection_with_vl(self, frame, bbox, predicted_class):
-        """
-        Verify a detection using VL model.
-
-        Args:
-            frame: Original video frame
-            bbox: Tuple (x1, y1, x2, y2) of bounding box
-            predicted_class: YOLO's predicted class name
-
-        Returns:
-            dict with verification results or None if verification fails/skipped
-        """
-        if not self.api_keys or not self.enable_vl:
-            return None
-
-        x1, y1, x2, y2 = bbox
-        bbox_width = x2 - x1
-        bbox_height = y2 - y1
-
-        # Skip if bbox is too small
-        if bbox_width < VL_MIN_BBOX_SIZE or bbox_height < VL_MIN_BBOX_SIZE:
-            logger.debug(f"Skipping VL for small bbox: {bbox_width}x{bbox_height}")
-            return None
-
-        try:
-            # Get next API key in rotation
-            api_key, key_index = self.get_next_api_key()
-            if not api_key:
-                return None
-
-            # Log which key slot is being used (mask all but last 4 chars)
-            logger.info(
-                f"VL call using API key #{key_index}/{len(self.api_keys)} "
-                f"(key: ...{api_key[-4:]})"
-            )
-
-            # Crop detection region
-            cropped = frame[y1:y2, x1:x2]
-
-            # Resize to optimize tokens (maintain aspect ratio)
-            max_dim = max(bbox_width, bbox_height)
-            if max_dim > VL_IMAGE_MAX_SIZE:
-                scale = VL_IMAGE_MAX_SIZE / max_dim
-                new_width = int(bbox_width * scale)
-                new_height = int(bbox_height * scale)
-                cropped = cv2.resize(cropped, (new_width, new_height))
-
-            # Encode to base64
-            _, buffer = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            base64_image = base64.b64encode(buffer).decode("utf-8")
-
-            # Optimized prompt for token efficiency
-            prompt = (
-                "Look at this image and classify it as exactly ONE of: "
-                "defected_sign_board, good_sign_board, pothole, road_crack, damaged_road_marking. "
-                'If the image does NOT match any of these categories, set category to "null" '
-                "and belongs_to_category to false. "
-                "If it DOES match a category, set belongs_to_category to true. "
-                'Respond with JSON: {"category": "name_or_null", "confidence": "high/medium/low", '
-                '"belongs_to_category": true/false}'
-            )
-
-            # Create client with rotated API key
-            vl_client = create_ollama_client(api_key)
-            if not vl_client:
-                return None
-
-            # Hard timeout enforcement via thread
-            def _call_vl():
-                return vl_client.chat(
-                    model=VL_MODEL,
-                    format="json",
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": prompt + "\n\nRespond ONLY with valid JSON.",
-                            "images": [base64_image],
-                        }
-                    ],
-                    options={"temperature": 0.1},
-                )
-
-            vl_start = time.time()
-            future = _vl_timeout_executor.submit(_call_vl)
-            try:
-                response = future.result(timeout=VL_TIMEOUT)
-            except FuturesTimeoutError:
-                vl_elapsed = time.time() - vl_start
-                logger.warning(
-                    f"VL call TIMED OUT after {vl_elapsed:.1f}s for YOLO={predicted_class}. "
-                    f"Skipping VL — YOLO result will be used as-is."
-                )
-                return None
-            vl_elapsed = time.time() - vl_start
-
-            # Parse response
-            vl_result = json.loads(response["message"]["content"])
-            vl_result["yolo_prediction"] = predicted_class
-            vl_result["_vl_elapsed_s"] = vl_elapsed  # used by caller for perf tracking
-
-            # Log VL result with timing
-            vl_cat = vl_result.get("category")
-            vl_conf = vl_result.get("confidence")
-            match = "✓" if vl_cat == predicted_class else "✗"
-            logger.info(
-                f"VL call {match} [{vl_elapsed:.2f}s]: YOLO={predicted_class}, VL={vl_cat} "
-                f"(confidence={vl_conf}, belongs={vl_result.get('belongs_to_category')})"
-            )
-
-            return vl_result
-
-        except json.JSONDecodeError as e:
-            logger.error(f"VL JSON parse error: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"VL verification error: {e}")
-            return None
-
     def _process_video_blocking(
         self, video_id: str, video_path: str, json_path: str, speed: int, loop
     ):
+        has_verify = self.verify_fn is not None
         cap = None
         try:
             asyncio.run_coroutine_threadsafe(
@@ -328,10 +133,10 @@ class YoloVLDetector(BaseDetector):
             perf_timings = {
                 "frame_decode": {"total": 0.0, "count": 0},
                 "yolo_inference": {"total": 0.0, "count": 0},
-                "gps_coord": {"total": 0.0, "count": 0},  # find_nearest_gps
-                "vl_verification": {"total": 0.0, "count": 0},  # tallied from VL logs
-                "db_gps_match": {"total": 0.0, "count": 0},  # find_location_by_gps
-                "db_bulk_write": {"total": 0.0, "count": 0},  # crud bulk insert
+                "gps_coord": {"total": 0.0, "count": 0},
+                "verification": {"total": 0.0, "count": 0},
+                "db_gps_match": {"total": 0.0, "count": 0},
+                "db_bulk_write": {"total": 0.0, "count": 0},
             }
             # ────────────────────────────────────────────────────────────────
 
@@ -345,13 +150,12 @@ class YoloVLDetector(BaseDetector):
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             video_duration = total_frames / fps
 
-            mode_label = "YOLO+VL" if self.enable_vl else "YOLO-only"
             logger.info(
-                f"Processing [{mode_label}] for {video_id}: {total_frames} frames @ {fps:.1f} FPS"
+                f"Processing [{self.detection_mode}] for {video_id}: {total_frames} frames @ {fps:.1f} FPS"
             )
             logger.info(
                 f"Performance settings: FRAME_SKIP={FRAME_SKIP}, YOLO_IMGSZ={YOLO_IMGSZ}, "
-                f"FP16={'ON' if USE_HALF else 'OFF'}, VL={'ASYNC' if self.enable_vl else 'OFF'}"
+                f"FP16={'ON' if USE_HALF else 'OFF'}, VERIFY={'ON' if has_verify else 'OFF'}"
             )
 
             # Adaptive parameters
@@ -372,10 +176,10 @@ class YoloVLDetector(BaseDetector):
             counted_ids = {cls: set() for cls in ALL_CLASSES}
             spatial_locations = []
             tracker_class_lock = {}
-            # Pending VL futures: tid -> {future, detection_info}
-            pending_vl = {}
-            vl_cache = {}  # Cache VL results by detection_id to avoid redundant calls
-            rejected_tids = set()  # Track VL-rejected tids to prevent re-confirmation
+            # Pending verification futures: tid -> {future, detection_info}
+            pending_verify = {}
+            verify_cache = {}  # Cache verify results by detection_id to avoid redundant calls
+            rejected_tids = set()  # Track verify-rejected tids to prevent re-confirmation
 
             def _confirm_detection(
                 tid,
@@ -401,7 +205,7 @@ class YoloVLDetector(BaseDetector):
                     "first_detected_time": round(current_time, 2),
                     "confidence": round(float(conf), 3),
                     "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                    "vl_verified": vl_verified if self.enable_vl else None,
+                    "vl_verified": vl_verified if has_verify else None,
                     "vl_confidence": vl_confidence,
                     "vl_category": vl_category,
                 }
@@ -416,10 +220,10 @@ class YoloVLDetector(BaseDetector):
                 )
                 rejection_stats["multi_frame_pending"].discard(tid)
 
-            def _process_completed_vl_futures():
-                """Check pending VL futures and apply results retroactively."""
+            def _process_completed_verify_futures():
+                """Check pending verify futures and apply results retroactively."""
                 done_tids = []
-                for tid, pending in pending_vl.items():
+                for tid, pending in pending_verify.items():
                     future = pending["future"]
                     if not future.done():
                         continue
@@ -428,7 +232,7 @@ class YoloVLDetector(BaseDetector):
                     try:
                         vl_result = future.result(timeout=0)
                     except Exception as e:
-                        logger.warning(f"VL async error for tid={tid}: {e}")
+                        logger.warning(f"Verify async error for tid={tid}: {e}")
                         rejection_stats["vl_errors"] += 1
                         # Already confirmed with YOLO — leave as-is
                         continue
@@ -437,13 +241,13 @@ class YoloVLDetector(BaseDetector):
                         rejection_stats["vl_errors"] += 1
                         continue
 
-                    vl_stats["total_verified"] += 1
-                    vl_cache[tid] = vl_result
+                    verify_stats["total_verified"] += 1
+                    verify_cache[tid] = vl_result
 
-                    # Accumulate VL elapsed time into perf_timings
+                    # Accumulate verify elapsed time into perf_timings
                     _vl_elapsed = vl_result.pop("_vl_elapsed_s", 0.0)
-                    perf_timings["vl_verification"]["total"] += _vl_elapsed
-                    perf_timings["vl_verification"]["count"] += 1
+                    perf_timings["verification"]["total"] += _vl_elapsed
+                    perf_timings["verification"]["count"] += 1
 
                     vl_category = vl_result.get("category")
                     vl_confidence = vl_result.get("confidence")
@@ -451,8 +255,8 @@ class YoloVLDetector(BaseDetector):
                     yolo_class = pending["class_name"]
 
                     if vl_category == yolo_class and belongs:
-                        # Tier 1: VL agrees — mark as verified
-                        vl_stats["verified_success"] += 1
+                        # Tier 1: Verify agrees — mark as verified
+                        verify_stats["verified_success"] += 1
                         if tid in confirmed:
                             confirmed[tid]["vl_verified"] = True
                             confirmed[tid]["vl_confidence"] = vl_confidence
@@ -464,13 +268,13 @@ class YoloVLDetector(BaseDetector):
                         and belongs
                         and vl_confidence in ("high", "medium")
                     ):
-                        # Tier 2: VL disagrees but has valid class — override
+                        # Tier 2: Verify disagrees but has valid class — override
                         logger.info(
-                            f"VL async override tid={tid}: YOLO={yolo_class} → VL={vl_category} "
+                            f"Verify async override tid={tid}: YOLO={yolo_class} → VL={vl_category} "
                             f"(conf={vl_confidence})"
                         )
-                        vl_stats["verified_success"] += 1
-                        vl_stats["vl_overrides"] += 1
+                        verify_stats["verified_success"] += 1
+                        verify_stats["vl_overrides"] += 1
                         if tid in confirmed:
                             # Move from old class to new class in counted_ids
                             old_class = confirmed[tid]["type"]
@@ -484,11 +288,11 @@ class YoloVLDetector(BaseDetector):
                             confirmed[tid]["vl_category"] = vl_category
                             tracker_class_lock[tid] = vl_category
                     else:
-                        # Tier 3: VL rejects — remove the confirmed detection
-                        vl_stats["verified_failed"] += 1
+                        # Tier 3: Verify rejects — remove the confirmed detection
+                        verify_stats["verified_failed"] += 1
                         rejection_stats["vl_mismatch"] += 1
                         logger.info(
-                            f"VL async rejected tid={tid}: YOLO={yolo_class}, "
+                            f"Verify async rejected tid={tid}: YOLO={yolo_class}, "
                             f"VL={vl_category} (conf={vl_confidence}, belongs={belongs})"
                         )
                         if tid in confirmed:
@@ -497,10 +301,10 @@ class YoloVLDetector(BaseDetector):
                                 counted_ids[old_class].discard(tid)
                             del confirmed[tid]
                         rejected_tids.add(tid)  # Prevent re-confirmation
-                        vl_cache[tid] = vl_result  # Prevent re-submission
+                        verify_cache[tid] = vl_result  # Prevent re-submission
 
                 for tid in done_tids:
-                    del pending_vl[tid]
+                    del pending_verify[tid]
 
             rejection_stats = {
                 "multi_frame_pending": set(),
@@ -511,7 +315,7 @@ class YoloVLDetector(BaseDetector):
                 "vl_errors": 0,
             }
 
-            vl_stats = {
+            verify_stats = {
                 "total_verified": 0,
                 "verified_success": 0,
                 "verified_failed": 0,
@@ -557,9 +361,9 @@ class YoloVLDetector(BaseDetector):
 
                 frame_data = {"frame_id": frame_count, "detections": []}
 
-                # Process any completed VL futures from previous frames
-                if self.enable_vl:
-                    _process_completed_vl_futures()
+                # Process any completed verify futures from previous frames
+                if has_verify:
+                    _process_completed_verify_futures()
 
                 if results[0].boxes.id is not None:
                     track_ids = results[0].boxes.id.cpu().numpy().astype(int)
@@ -615,7 +419,7 @@ class YoloVLDetector(BaseDetector):
                                 MIN_DISTANCE_THRESHOLD,
                             )
                             if not is_dup:
-                                # Optimistic accept — confirm now, let VL verify async
+                                # Optimistic accept — confirm now, let verify callback check async
                                 _confirm_detection(
                                     tid,
                                     class_name,
@@ -630,24 +434,23 @@ class YoloVLDetector(BaseDetector):
                                     cy,
                                 )
 
-                                # Submit async VL verification if enabled (capped concurrency)
+                                # Submit async verification if callback is provided
                                 if (
-                                    self.enable_vl
-                                    and self.api_keys
-                                    and tid not in vl_cache
-                                    and tid not in pending_vl
-                                    and len(pending_vl) < MAX_VL_CONCURRENT
+                                    has_verify
+                                    and tid not in verify_cache
+                                    and tid not in pending_verify
+                                    and len(pending_verify) < MAX_VERIFY_CONCURRENT
                                 ):
                                     frame_copy = frame.copy()
                                     bbox_copy = (x1, y1, x2, y2)
                                     class_copy = class_name
-                                    future = _async_vl_executor.submit(
-                                        self.verify_detection_with_vl,
+                                    future = _async_verify_executor.submit(
+                                        self.verify_fn,
                                         frame_copy,
                                         bbox_copy,
                                         class_copy,
                                     )
-                                    pending_vl[tid] = {
+                                    pending_verify[tid] = {
                                         "future": future,
                                         "class_name": class_copy,
                                     }
@@ -715,24 +518,25 @@ class YoloVLDetector(BaseDetector):
 
             yolo_end = time.time()
 
-            # --- Drain remaining VL futures after video processing ---
-            if self.enable_vl and pending_vl:
-                logger.info(f"Draining {len(pending_vl)} pending VL futures...")
+            # --- Drain remaining verify futures after video processing ---
+            if has_verify and pending_verify:
+                logger.info(f"Draining {len(pending_verify)} pending verify futures...")
                 from concurrent.futures import wait
 
-                remaining_futures = [p["future"] for p in pending_vl.values()]
+                remaining_futures = [p["future"] for p in pending_verify.values()]
+                VL_TIMEOUT = int(os.getenv("VL_TIMEOUT_SECONDS", "30"))
                 done, not_done = wait(remaining_futures, timeout=VL_TIMEOUT)
                 # Process completed ones
-                _process_completed_vl_futures()
+                _process_completed_verify_futures()
                 # Cancel any that didn't finish in time
-                if pending_vl:
+                if pending_verify:
                     logger.warning(
-                        f"{len(pending_vl)} VL futures timed out — cancelling"
+                        f"{len(pending_verify)} verify futures timed out — cancelling"
                     )
-                    for tid in list(pending_vl.keys()):
-                        pending_vl[tid]["future"].cancel()
+                    for tid in list(pending_verify.keys()):
+                        pending_verify[tid]["future"].cancel()
                         rejection_stats["vl_errors"] += 1
-                        del pending_vl[tid]
+                        del pending_verify[tid]
 
             vl_drain_end = time.time()
 
@@ -763,7 +567,7 @@ class YoloVLDetector(BaseDetector):
             results = {
                 "video_id": video_id,
                 "video_path": video_path,
-                "detection_mode": "yolo_vl" if self.enable_vl else "yolo",
+                "detection_mode": self.detection_mode,
                 "processed_at": datetime.now().isoformat(),
                 "video_info": {
                     "total_frames": total_frames,
@@ -801,14 +605,14 @@ class YoloVLDetector(BaseDetector):
                 },
                 "vl_stats": (
                     {
-                        "enabled": self.enable_vl,
-                        "total_verified": vl_stats["total_verified"],
-                        "verified_success": vl_stats["verified_success"],
-                        "verified_failed": vl_stats["verified_failed"],
-                        "vl_overrides": vl_stats["vl_overrides"],
-                        "cache_hits": vl_stats["skipped"],
+                        "enabled": has_verify,
+                        "total_verified": verify_stats["total_verified"],
+                        "verified_success": verify_stats["verified_success"],
+                        "verified_failed": verify_stats["verified_failed"],
+                        "vl_overrides": verify_stats["vl_overrides"],
+                        "cache_hits": verify_stats["skipped"],
                     }
-                    if self.enable_vl
+                    if has_verify
                     else None
                 ),
                 "defected_sign_board_list": defected_sign_board_list,
@@ -852,7 +656,7 @@ class YoloVLDetector(BaseDetector):
             fd_t, fd_c, fd_avg = _fmt("frame_decode")
             yi_t, yi_c, yi_avg = _fmt("yolo_inference")
             gc_t, gc_c, gc_avg = _fmt("gps_coord")
-            vl_t, vl_c, vl_avg = _fmt("vl_verification")
+            vl_t, vl_c, vl_avg = _fmt("verification")
             dg_t, dg_c, dg_avg = _fmt("db_gps_match")
             db_t, db_c, db_avg = _fmt("db_bulk_write")
 
@@ -862,15 +666,15 @@ class YoloVLDetector(BaseDetector):
 
             report_lines = [
                 f"{'=' * 78}",
-                f"  PERF REPORT — [{video_id}]  mode={'YOLO+VL' if self.enable_vl else 'YOLO-only'}",
+                f"  PERF REPORT — [{video_id}]  mode={self.detection_mode}",
                 f"{'=' * 78}",
                 f"  {'Stage':<30} {'Total (s)':>10} {'Count':>7} {'Avg/call (ms)':>15}",
                 f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
                 f"  {'Frame decode (I/O)':<30} {fd_t:>10.3f} {fd_c:>7d} {fd_avg:>15.2f}{_flag(fd_t)}",
                 f"  {'YOLO inference':<30} {yi_t:>10.3f} {yi_c:>7d} {yi_avg:>15.2f}{_flag(yi_t)}",
                 f"  {'GPS coord lookup':<30} {gc_t:>10.3f} {gc_c:>7d} {gc_avg:>15.2f}{_flag(gc_t)}",
-                f"  {'VL verification (async)':<30} {vl_t:>10.3f} {vl_c:>7d} {vl_avg:>15.2f}{_flag(vl_t)}",
-                f"  {'VL drain (post-loop)':<30} {drain_time:>10.3f} {'N/A':>7} {'N/A':>15}",
+                f"  {'Verification (async)':<30} {vl_t:>10.3f} {vl_c:>7d} {vl_avg:>15.2f}{_flag(vl_t)}",
+                f"  {'Verify drain (post-loop)':<30} {drain_time:>10.3f} {'N/A':>7} {'N/A':>15}",
                 f"  {'DB GPS matching':<30} {dg_t:>10.3f} {dg_c:>7d} {dg_avg:>15.2f}{_flag(dg_t)}",
                 f"  {'DB bulk write':<30} {db_t:>10.3f} {db_c:>7d} {db_avg:>15.2f}{_flag(db_t)}",
                 f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
@@ -878,7 +682,7 @@ class YoloVLDetector(BaseDetector):
                 f"  {'Video duration':<30} {video_duration:>10.1f}s  ({total_frames} frames @ {fps:.0f} FPS)",
                 f"  {'Frames processed':<30} {frames_processed:>10d}  (FRAME_SKIP={FRAME_SKIP})",
                 f"  {'Detections saved':<30} {len(all_detections_flat):>10d}",
-                f"  {'VL verifications done':<30} {vl_stats['total_verified']:>10d}",
+                f"  {'Verifications done':<30} {verify_stats['total_verified']:>10d}",
                 f"{'=' * 78}",
             ]
             report_str = "\n".join(report_lines)

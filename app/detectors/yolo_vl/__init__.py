@@ -1,1 +1,0 @@
-# YOLO + VL detector package

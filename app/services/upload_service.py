@@ -1,6 +1,6 @@
 from pathlib import Path
 from fastapi import UploadFile, HTTPException, Depends
-import shutil
+import anyio
 import uuid
 import asyncio
 import logging
@@ -32,6 +32,19 @@ class DetectionMode(str, Enum):
 
 # Keep backward-compatible alias so other internal code can still import DetectionType
 DetectionType = DetectionMode
+
+
+_CHUNK = 1 << 20  # 1 MB (1048576 bytes) — yields event loop every chunk 
+
+
+async def _save_upload_async(upload: UploadFile, dest: Path) -> None:
+    """Stream an UploadFile to disk in 1 MB chunks without blocking the event loop."""
+    async with await anyio.open_file(dest, "wb") as f:
+        while True:
+            chunk = await upload.read(_CHUNK)
+            if not chunk:
+                break
+            await f.write(chunk)
 
 
 class UploadService:
@@ -74,19 +87,15 @@ class UploadService:
         # Generate unique video ID
         video_id = str(uuid.uuid4())
 
-        # Save uploaded video file
         file_extension = Path(file.filename).suffix
         video_path = UPLOAD_DIR / f"{video_id}{file_extension}"
-        # save json file
+        
         json_file_extension = Path(json_file.filename).suffix
         json_path = UPLOAD_DIR / f"{video_id}{json_file_extension}"
 
         try:
-            with open(video_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-
-            with open(json_path, "wb") as buffer:
-                shutil.copyfileobj(json_file.file, buffer)
+            await _save_upload_async(file, video_path)
+            await _save_upload_async(json_file, json_path)
 
             logger.info(f"Video uploaded: {video_id} - {file.filename}")
             logger.info(f"JSON file uploaded: {video_id} - {json_file.filename}")

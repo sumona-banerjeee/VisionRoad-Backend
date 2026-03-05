@@ -1,23 +1,7 @@
 import time
-
-_boot_start = time.time()
-
-import torch
-
-# Monkeypatch torch.load BEFORE any imports that load models
-# Fixes PyTorch 2.6+ weights_only=True default breaking YOLO model loading
-_original_load = torch.load
-
-
-def _patched_load(*args, **kwargs):
-    kwargs["weights_only"] = False
-    return _original_load(*args, **kwargs)
-
-
-torch.load = _patched_load
-
 import builtins
 
+_boot_start = time.time()
 builtins._boot_start = _boot_start  # Share with app lifespan
 
 from app import create_app

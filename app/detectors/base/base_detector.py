@@ -2,6 +2,7 @@ import json
 import asyncio
 import logging
 import torch
+from contextlib import contextmanager
 from pathlib import Path
 from ultralytics import YOLO
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +16,29 @@ logger = logging.getLogger(__name__)
 executor = ThreadPoolExecutor(max_workers=4)
 
 
+@contextmanager
+def _yolo_load_ctx():
+    """
+    Scoped torch.load patch for YOLO model loading only.
+
+    PyTorch 2.6+ defaults to weights_only=True which breaks Ultralytics .pt
+    files. Rather than patching globally (main.py approach — a process-wide
+    security hole), we patch only for the duration of YOLO(model_path) and
+    immediately restore the safe default afterwards.
+    """
+    _original = torch.load
+
+    def _patched(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return _original(*args, **kwargs)
+
+    torch.load = _patched
+    try:
+        yield
+    finally:
+        torch.load = _original  # always restore, even on exception
+
+
 class BaseDetector:
     def __init__(self, model_path: str, device: str = None):
         self.model_path = model_path
@@ -25,7 +49,8 @@ class BaseDetector:
     def _load_model(self):
         try:
             logger.info(f"Loading model {self.model_path} on device: {self.device}")
-            self.model = YOLO(self.model_path)
+            with _yolo_load_ctx():
+                self.model = YOLO(self.model_path)
             # NOTE: do NOT call model.to(device) + model.half() here.
             # Ultralytics runs Conv+BN fusion (fuse()) on the first predict/track call
             # and requires FP32 weights at that point. FP16 is applied correctly via

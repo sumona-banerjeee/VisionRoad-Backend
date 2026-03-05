@@ -189,7 +189,6 @@ class Sam3Verifier:
                         best_prompt = prompt_text
 
                 del outputs, inputs
-                torch.cuda.empty_cache()
 
             except Exception as e:
                 logger.warning(f"SAM3 verify error prompt='{prompt_text}': {e}")
@@ -202,6 +201,13 @@ class Sam3Verifier:
             f"SAM3 {icon} [{elapsed:.2f}s] class={yolo_class!r} "
             f"prompt={best_prompt!r} score={best_score:.3f} threshold={threshold}"
         )
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info(
+                f"[FIX-5] CUDA cache cleared ONCE at end of verify() "
+                f"(class={yolo_class!r}, prompts_tested={len(prompts)})"
+            )
+
         return {
             "sam3_agrees": agrees,
             "sam3_score": round(best_score, 4),

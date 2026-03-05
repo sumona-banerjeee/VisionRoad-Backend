@@ -333,7 +333,7 @@ class YoloDetector(BaseDetector):
                     del _tid_last_seen[tid]
                 if stale_tids:
                     logger.info(
-                        f"[FIX-7] Evicted {len(stale_tids)} stale tracker IDs | "
+                        f"Evicted {len(stale_tids)} stale tracker IDs | "
                         f"verify_cache={len(verify_cache)} rejected={len(rejected_tids)} "
                         f"tracker_lock={len(tracker_class_lock)} last_seen={len(_tid_last_seen)}"
                     )
@@ -363,7 +363,7 @@ class YoloDetector(BaseDetector):
             _ndjson_path = _ndjson_fd.name
             _frames_written = 0
             logger.info(
-                f"[FIX-6] NDJSON streaming enabled — temp file: {_ndjson_path}"
+                f"NDJSON streaming enabled — temp file: {_ndjson_path}"
             )
             total_detections_count = 0
             frame_count = 0
@@ -533,7 +533,7 @@ class YoloDetector(BaseDetector):
                     _frames_written += 1
                     if _frames_written % 50 == 0:
                         logger.info(
-                            f"[FIX-6] NDJSON streamed {_frames_written} frames to disk so far"
+                            f" NDJSON streamed {_frames_written} frames to disk so far"
                         )
 
                 # Progress
@@ -775,7 +775,7 @@ class YoloDetector(BaseDetector):
                     _ndjson_fd.close()
                 if "_ndjson_path" in dir() and os.path.exists(_ndjson_path):
                     os.remove(_ndjson_path)
-                    logger.info(f"[FIX-6] NDJSON temp file cleaned up: {_ndjson_path}")
+                    logger.info(f"NDJSON temp file cleaned up: {_ndjson_path}")
             except OSError:
                 pass
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
@@ -795,7 +795,7 @@ class YoloDetector(BaseDetector):
         except Exception as e:
             logger.warning(f"Failed to read back NDJSON frames: {e}")
         logger.info(
-            f"[FIX-6] NDJSON read-back complete — {len(frames)} frames loaded "
+            f"NDJSON read-back complete — {len(frames)} frames loaded "
             f"(expected {expected_count}) from {ndjson_path}"
         )
         return frames

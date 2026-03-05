@@ -204,7 +204,7 @@ class Sam3Verifier:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             logger.info(
-                f"[FIX-5] CUDA cache cleared ONCE at end of verify() "
+                f"CUDA cache cleared ONCE at end of verify() "
                 f"(class={yolo_class!r}, prompts_tested={len(prompts)})"
             )
 

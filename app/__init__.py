@@ -1,4 +1,5 @@
 import time
+import logging
 import builtins
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,8 @@ from app.routes.location_routes import router as location_router
 from app.routes.summary_routes import router as summary_router
 from app.db.database import init_db
 from app.core.logging_config import setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -28,7 +31,14 @@ async def lifespan(app: FastAPI):
     total = time.time() - getattr(builtins, "_boot_start", start_time)
     print(f"✓ Lifespan init in {elapsed:.2f}s | Total boot time: {total:.2f}s")
     yield
-    # Shutdown: cleanup if needed
+    # Shutdown: drain and close thread pools
+    logger.info("Shutting down executor pools …")
+    from app.detectors.base.base_detector import get_executor
+    from app.detectors.yolo.detector import get_verify_executor
+
+    get_executor().shutdown(wait=True, cancel_futures=False)
+    get_verify_executor().shutdown(wait=True, cancel_futures=False)
+    logger.info("✓ Executor pools shut down cleanly")
     print("✓ Application shutdown")
 
 

@@ -60,6 +60,11 @@ _async_verify_executor = ThreadPoolExecutor(
 )
 
 
+def get_verify_executor() -> ThreadPoolExecutor:
+    """Return the async-verify executor (for lifespan shutdown)."""
+    return _async_verify_executor
+
+
 class YoloDetector(BaseDetector):
     """
     Pure YOLO detector with optional verification callback.
@@ -76,7 +81,9 @@ class YoloDetector(BaseDetector):
         self.verify_fn = verify_fn
         self.detection_mode = detection_mode
 
-        mode_label = f"YOLO+verify ({self.detection_mode})" if self.verify_fn else "YOLO-only"
+        mode_label = (
+            f"YOLO+verify ({self.detection_mode})" if self.verify_fn else "YOLO-only"
+        )
         logger.info(f"YoloDetector ready — mode: {mode_label}")
 
     @staticmethod
@@ -178,8 +185,12 @@ class YoloDetector(BaseDetector):
             tracker_class_lock = {}
             # Pending verification futures: tid -> {future, detection_info}
             pending_verify = {}
-            verify_cache = {}  # Cache verify results by detection_id to avoid redundant calls
-            rejected_tids = set()  # Track verify-rejected tids to prevent re-confirmation
+            verify_cache = (
+                {}
+            )  # Cache verify results by detection_id to avoid redundant calls
+            rejected_tids = (
+                set()
+            )  # Track verify-rejected tids to prevent re-confirmation
 
             def _confirm_detection(
                 tid,

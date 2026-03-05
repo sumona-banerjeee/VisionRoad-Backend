@@ -12,8 +12,13 @@ from app.core.config import processing_status
 
 logger = logging.getLogger(__name__)
 
-# Shared thread pool for all detectors
-executor = ThreadPoolExecutor(max_workers=4)
+# Shared thread pool for all detectors (video processing jobs)
+executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="video_proc")
+
+
+def get_executor() -> ThreadPoolExecutor:
+    """Return the shared video-processing executor (for lifespan shutdown)."""
+    return executor
 
 
 @contextmanager

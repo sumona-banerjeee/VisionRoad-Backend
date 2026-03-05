@@ -16,6 +16,7 @@ import time
 import logging
 import torch
 import os
+import tempfile
 from datetime import datetime
 from collections import defaultdict, deque
 from dotenv import load_dotenv
@@ -180,6 +181,7 @@ class YoloDetector(BaseDetector):
             pending_verify = {}
             verify_cache = {}  # Cache verify results by detection_id to avoid redundant calls
             rejected_tids = set()  # Track verify-rejected tids to prevent re-confirmation
+            _tid_last_seen = {}  # tid -> last current_time the tid was observed
 
             def _confirm_detection(
                 tid,
@@ -306,6 +308,29 @@ class YoloDetector(BaseDetector):
                 for tid in done_tids:
                     del pending_verify[tid]
 
+            def _evict_stale_trackers():
+                """Remove stale entries from verify_cache, rejected_tids,
+                tracker_class_lock, and tracker_history whose tid hasn't been
+                seen for more than TIME_THRESHOLD seconds."""
+                stale_tids = [
+                    tid for tid, last_t in _tid_last_seen.items()
+                    if current_time - last_t > TIME_THRESHOLD
+                    and tid not in confirmed
+                    and tid not in pending_verify
+                ]
+                for tid in stale_tids:
+                    verify_cache.pop(tid, None)
+                    rejected_tids.discard(tid)
+                    tracker_class_lock.pop(tid, None)
+                    tracker_history.pop(tid, None)
+                    del _tid_last_seen[tid]
+                if stale_tids:
+                    logger.info(
+                        f"[FIX-7] Evicted {len(stale_tids)} stale tracker IDs | "
+                        f"verify_cache={len(verify_cache)} rejected={len(rejected_tids)} "
+                        f"tracker_lock={len(tracker_class_lock)} last_seen={len(_tid_last_seen)}"
+                    )
+
             rejection_stats = {
                 "multi_frame_pending": set(),
                 "spatial_duplicate": 0,
@@ -323,7 +348,16 @@ class YoloDetector(BaseDetector):
                 "vl_overrides": 0,
             }
 
-            results_log = {"frames": []}
+            # Stream frame data to NDJSON temp file instead of unbounded list
+            _ndjson_fd = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".ndjson", prefix=f"frames_{video_id}_",
+                dir=str(RESULTS_DIR), delete=False,
+            )
+            _ndjson_path = _ndjson_fd.name
+            _frames_written = 0
+            logger.info(
+                f"[FIX-6] NDJSON streaming enabled — temp file: {_ndjson_path}"
+            )
             total_detections_count = 0
             frame_count = 0
             last_progress = 0
@@ -393,6 +427,7 @@ class YoloDetector(BaseDetector):
                             tracker_class_lock[tid] = class_name
 
                         tracker_history[tid].append(current_time)
+                        _tid_last_seen[tid] = current_time
                         recent = [
                             t
                             for t in tracker_history[tid]
@@ -487,7 +522,12 @@ class YoloDetector(BaseDetector):
                             )
 
                 if frame_data["detections"]:
-                    results_log["frames"].append(frame_data)
+                    _ndjson_fd.write(json.dumps(frame_data) + "\n")
+                    _frames_written += 1
+                    if _frames_written % 50 == 0:
+                        logger.info(
+                            f"[FIX-6] NDJSON streamed {_frames_written} frames to disk so far"
+                        )
 
                 # Progress
                 progress = int((frame_count / total_frames) * 100)
@@ -515,6 +555,8 @@ class YoloDetector(BaseDetector):
                         },
                     )
                     last_progress = progress
+                    # Periodically evict stale tracker entries to bound memory
+                    _evict_stale_trackers()
 
             yolo_end = time.time()
 
@@ -557,7 +599,7 @@ class YoloDetector(BaseDetector):
                 confirmed, "good_sign_board", gps_points, perf_timings
             )
 
-            frames_with_detections = len(results_log["frames"])
+            frames_with_detections = _frames_written
             detection_rate = (
                 round((frames_with_detections / frame_count) * 100, 2)
                 if frame_count > 0
@@ -620,7 +662,8 @@ class YoloDetector(BaseDetector):
                 "road_crack_list": road_crack_list,
                 "damaged_road_marking_list": damaged_road_marking_list,
                 "good_sign_board_list": good_sign_board_list,
-                "frames": results_log["frames"],
+                # Read back streamed frames from NDJSON temp file
+                "frames": self._read_ndjson_frames(_ndjson_fd, _ndjson_path, _frames_written),
             }
 
             detection_results[video_id] = results
@@ -719,7 +762,36 @@ class YoloDetector(BaseDetector):
         finally:
             if cap:
                 cap.release()
+            # Clean up NDJSON temp file
+            try:
+                if "_ndjson_fd" in dir() and not _ndjson_fd.closed:
+                    _ndjson_fd.close()
+                if "_ndjson_path" in dir() and os.path.exists(_ndjson_path):
+                    os.remove(_ndjson_path)
+                    logger.info(f"[FIX-6] NDJSON temp file cleaned up: {_ndjson_path}")
+            except OSError:
+                pass
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    @staticmethod
+    def _read_ndjson_frames(ndjson_fd, ndjson_path: str, expected_count: int = 0) -> list:
+        """Close the NDJSON temp file and read all frame lines back as a list."""
+        if not ndjson_fd.closed:
+            ndjson_fd.close()
+        frames = []
+        try:
+            with open(ndjson_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        frames.append(json.loads(line))
+        except Exception as e:
+            logger.warning(f"Failed to read back NDJSON frames: {e}")
+        logger.info(
+            f"[FIX-6] NDJSON read-back complete — {len(frames)} frames loaded "
+            f"(expected {expected_count}) from {ndjson_path}"
+        )
+        return frames
 
     def _get_class_list(self, confirmed, class_name, gps_points, perf_timings=None):
         lst = []

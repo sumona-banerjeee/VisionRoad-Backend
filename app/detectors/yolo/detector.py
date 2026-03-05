@@ -734,6 +734,10 @@ class YoloDetector(BaseDetector):
 
     def _get_class_list(self, confirmed, class_name, gps_points, perf_timings=None):
         lst = []
+        # Pre-build timestamp list once — find_nearest_gps reuses it (O(log N) per call)
+        gps_timestamps = (
+            [p.get("timestamp", 0) for p in gps_points] if gps_points else []
+        )
         for tid, info in confirmed.items():
             if info["type"] == class_name:
                 det_data = {
@@ -750,7 +754,7 @@ class YoloDetector(BaseDetector):
                 if gps_points:
                     _t0 = time.perf_counter()
                     gps_coords = self.find_nearest_gps(
-                        info["first_detected_time"], gps_points
+                        info["first_detected_time"], gps_points, gps_timestamps
                     )
                     _gps_elapsed = time.perf_counter() - _t0
                     if perf_timings is not None:

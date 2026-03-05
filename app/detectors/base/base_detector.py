@@ -1,4 +1,5 @@
 import json
+import bisect
 import asyncio
 import logging
 import torch
@@ -83,13 +84,37 @@ class BaseDetector:
             pass
 
     @staticmethod
-    def find_nearest_gps(detection_time: float, gps_points: list) -> dict:
+    def find_nearest_gps(
+        detection_time: float,
+        gps_points: list,
+        _timestamps: list | None = None,
+    ) -> dict:
+        """Return the GPS point whose timestamp is closest to detection_time."""
         if not gps_points:
             return {"lat": None, "lng": None}
-        nearest_point = min(
-            gps_points, key=lambda p: abs(p.get("timestamp", 0) - detection_time)
+
+        timestamps = (
+            _timestamps
+            if _timestamps is not None
+            else [p.get("timestamp", 0) for p in gps_points]
         )
-        return {"lat": nearest_point.get("lat"), "lng": nearest_point.get("lng")}
+
+        idx = bisect.bisect_left(timestamps, detection_time)
+
+        if idx == 0:
+            nearest = gps_points[0]
+        elif idx >= len(gps_points):
+            nearest = gps_points[-1]
+        else:
+            before, after = gps_points[idx - 1], gps_points[idx]
+            nearest = (
+                before
+                if abs(before.get("timestamp", 0) - detection_time)
+                <= abs(after.get("timestamp", 0) - detection_time)
+                else after
+            )
+
+        return {"lat": nearest.get("lat"), "lng": nearest.get("lng")}
 
     async def process_video(
         self, video_id: str, video_path: str, json_path: str, speed_kmh: int

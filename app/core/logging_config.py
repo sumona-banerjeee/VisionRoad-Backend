@@ -8,9 +8,6 @@ import logging.handlers
 import os
 import time
 from pathlib import Path
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Create logs directory
 LOGS_DIR = Path("logs")
@@ -183,9 +180,8 @@ def setup_logging():
         if not _has_handler_for_file(det_logger, ERROR_LOG_FILE):
             det_logger.addHandler(error_handler)
 
-    # In development, also stream detection logs to the console so you can
+    # In development, also stream detection logs to the console so we can
     # monitor YOLO/VL progress in real time without tailing a file.
-    # Set APP_ENV=production in .env to suppress this.
     if os.getenv("APP_ENV", "development") != "production":
         for logger_name in _DETECTION_LOGGERS:
             dev_logger = logging.getLogger(logger_name)

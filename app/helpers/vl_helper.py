@@ -16,9 +16,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 import ollama
-from dotenv import load_dotenv
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +58,9 @@ def _load_api_keys():
     if api_keys:
         logger.info(f"VL Helper: Loaded {len(api_keys)} API key(s) for VL verification")
     else:
-        logger.warning("VL Helper: No API keys found. VL verification will be disabled.")
+        logger.warning(
+            "VL Helper: No API keys found. VL verification will be disabled."
+        )
 
     return api_keys
 

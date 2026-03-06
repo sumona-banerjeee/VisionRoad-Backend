@@ -19,9 +19,6 @@ import os
 import tempfile
 from datetime import datetime
 from collections import defaultdict, deque
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from app.detectors.base.base_detector import BaseDetector
 from app.ws.websocket_manager import manager
@@ -192,8 +189,12 @@ class YoloDetector(BaseDetector):
             tracker_class_lock = {}
             # Pending verification futures: tid -> {future, detection_info}
             pending_verify = {}
-            verify_cache = {}  # Cache verify results by detection_id to avoid redundant calls
-            rejected_tids = set()  # Track verify-rejected tids to prevent re-confirmation
+            verify_cache = (
+                {}
+            )  # Cache verify results by detection_id to avoid redundant calls
+            rejected_tids = (
+                set()
+            )  # Track verify-rejected tids to prevent re-confirmation
             _tid_last_seen = {}  # tid -> last current_time the tid was observed
 
             def _confirm_detection(

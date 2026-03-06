@@ -1,6 +1,13 @@
+import os
 from pathlib import Path
 from typing import Dict
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+# Single, centralized load_dotenv() for the entire app.
+# This populates os.environ so os.getenv() works everywhere.
+# Must be called before any module reads env vars at import time.
+load_dotenv()
 
 
 class Settings(BaseSettings):

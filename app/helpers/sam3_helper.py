@@ -27,12 +27,9 @@ import threading
 import cv2
 import numpy as np
 import torch
-from dotenv import load_dotenv
 from huggingface_hub import login
 from PIL import Image
 from transformers import Sam3Model, Sam3Processor
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 

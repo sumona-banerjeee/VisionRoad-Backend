@@ -10,6 +10,7 @@ from app.routes.package_routes import router as package_router
 from app.routes.location_routes import router as location_router
 from app.routes.summary_routes import router as summary_router
 from app.db.database import init_db
+import app.core.config  # noqa: F401 — imported first to run load_dotenv() before any os.getenv() calls
 from app.core.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -65,11 +66,11 @@ def create_app():
                 "packages": "/api/v1/packages",
                 "locations": "/api/v1/locations",
                 "summary": "/api/v1/summary",
-                "upload": "/api/upload",
-                "status": "/api/status/{video_id}",
-                "results": "/api/results/{video_id}",
-                "websocket": "/ws/{video_id}",
-                "list_videos": "/api/videos",
+                "upload": "/api/v1/upload",
+                "status": "/api/v1/status/{video_id}",
+                "results": "/api/v1/results/{video_id}",
+                "websocket": "/api/v1/ws/{video_id}",
+                "list_videos": "/api/v1/videos",
             },
         }
 

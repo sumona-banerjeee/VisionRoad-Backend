@@ -1,7 +1,7 @@
 """CRUD operations for Project, Package, and Location models"""
 
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, and_, or_
 from typing import Optional, List
 from app.models.project import Project
 from app.models.package import Package
@@ -219,10 +219,14 @@ def find_location_by_gps(
         Location if found, None otherwise
     """
     query = db.query(Location).filter(
-        Location.start_lat <= lat,
-        Location.end_lat >= lat,
-        Location.start_lng <= lng,
-        Location.end_lng >= lng,
+        or_(
+            and_(Location.start_lat <= lat, Location.end_lat >= lat),
+            and_(Location.end_lat <= lat, Location.start_lat >= lat),
+        ),
+        or_(
+            and_(Location.start_lng <= lng, Location.end_lng >= lng),
+            and_(Location.end_lng <= lng, Location.start_lng >= lng),
+        ),
     )
 
     if package_id:

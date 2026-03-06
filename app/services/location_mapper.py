@@ -1,63 +1,8 @@
 """Location mapping service for GPS-based detection assignment"""
 
-import time
 from sqlalchemy.orm import Session
 from typing import Optional
 from app.models.location import Location
-from app.core.logging_config import perf_logger
-
-
-def find_location_by_gps(
-    db: Session, lat: float, lng: float, package_id: Optional[str] = None
-) -> Optional[Location]:
-    """
-    Find location that contains the given GPS coordinate.
-
-    Uses bounding box matching with min/max to handle roads in any direction.
-
-    Args:
-        db: Database session
-        lat: Latitude coordinate
-        lng: Longitude coordinate
-        package_id: Optional package filter to narrow down search
-
-    Returns:
-        Location object if GPS falls within a location's bounds, None otherwise
-
-    Example:
-        >>> location = find_location_by_gps(db, 22.5726, 88.3639)
-        >>> if location:
-        >>>     print(f"Detection in {location.segment_name}")
-    """
-    # Get all locations (optionally filtered by package)
-    query = db.query(Location)
-    if package_id:
-        query = query.filter(Location.package_id == package_id)
-
-    _t0 = time.perf_counter()
-    locations = query.all()
-    _fetch_elapsed = time.perf_counter() - _t0
-    perf_logger.debug(
-        f"[location_mapper] DB fetch {len(locations)} locations | {_fetch_elapsed:.4f}s"
-    )
-
-    # Check each location's bounding box using contains_point
-    _t1 = time.perf_counter()
-    for location in locations:
-        if location.contains_point(lat, lng):
-            _scan_elapsed = time.perf_counter() - _t1
-            perf_logger.debug(
-                f"[location_mapper] bbox scan HIT after {_scan_elapsed:.4f}s"
-                f" | lat={lat:.5f} lng={lng:.5f} → {location.segment_name}"
-            )
-            return location
-
-    _scan_elapsed = time.perf_counter() - _t1
-    perf_logger.debug(
-        f"[location_mapper] bbox scan MISS after {_scan_elapsed:.4f}s"
-        f" | lat={lat:.5f} lng={lng:.5f} | scanned {len(locations)} rows"
-    )
-    return None
 
 
 def get_location_hierarchy(db: Session, location_id: str) -> Optional[dict]:

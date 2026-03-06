@@ -27,7 +27,7 @@ from app.core.logging_config import PerfTimer, perf_logger
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
-from app.services.location_mapper import find_location_by_gps
+from app.db.crud_hierarchy import find_location_by_gps
 
 logger = logging.getLogger(__name__)
 

@@ -743,11 +743,8 @@ class YoloDetector(BaseDetector):
             ]
             report_str = "\n".join(report_lines)
 
-            # Write to the dedicated perf log (clean for parsing/charting)
+            # Write to the dedicated perf log only — detection.log stays clean
             perf_logger.info(f"\n{report_str}")
-            # Also appear in the main application log at INFO
-            logger.info(f"\n{report_str}")
-            # ────────────────────────────────────────────────────────────────
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
             asyncio.run_coroutine_threadsafe(
@@ -855,11 +852,6 @@ class YoloDetector(BaseDetector):
                     if perf_timings is not None:
                         perf_timings["db_gps_match"]["total"] += _gps_db_elapsed
                         perf_timings["db_gps_match"]["count"] += 1
-                    perf_logger.info(
-                        f"[{video_id}] DB GPS match | {_gps_db_elapsed:.4f}s"
-                        f" | lat={lat:.5f} lng={lng:.5f}"
-                        f" | {'HIT' if location else 'MISS'}"
-                    )
                     if location:
                         location_id, package_id = location.id, location.package_id
                         if location.package:
@@ -889,10 +881,6 @@ class YoloDetector(BaseDetector):
                 if perf_timings is not None:
                     perf_timings["db_bulk_write"]["total"] += _bulk_elapsed
                     perf_timings["db_bulk_write"]["count"] += 1
-                perf_logger.info(
-                    f"[{video_id}] DB bulk write | {_bulk_elapsed:.4f}s"
-                    f" | {len(db_detections)} rows"
-                )
                 logger.info(
                     f"Saved {len(db_detections)} detections to database for {video_id}"
                 )

@@ -102,22 +102,27 @@ class YoloDetector(BaseDetector):
         time_threshold,
         min_distance_threshold,
     ):
-        """Check if this location/class was already counted recently."""
-        for existing in spatial_locations:
-            prev_cx, prev_cy = existing["center"]
-            prev_class = existing["class"]
-            prev_time = existing["time"]
+        """
+        Check if this location/class was already counted recently.
 
-            distance = self.calculate_distance((cx, cy), (prev_cx, prev_cy))
-            time_gap = current_time - prev_time
+        spatial_locations is a defaultdict(deque) keyed by class_name.
+        Entries are appended in time order so expired ones are pruned
+        from the front in O(1) before scanning — keeping the active
+        window small regardless of video length.
+        """
+        bucket = spatial_locations[class_name]
 
-            if (
-                prev_class == class_name
-                and distance < min_distance_threshold
-                and time_gap < time_threshold
-            ):
-                reason = f"{distance:.1f}px from existing, {time_gap:.2f}s ago"
-                return True, reason
+        # Prune entries outside the time window (deque is time-ordered)
+        while bucket and (current_time - bucket[0]["time"]) > time_threshold:
+            bucket.popleft()
+
+        # Only same-class entries remain — no class check needed in the loop
+        for existing in bucket:
+            distance = self.calculate_distance((cx, cy), existing["center"])
+            if distance < min_distance_threshold:
+                time_gap = current_time - existing["time"]
+                return True, f"{distance:.1f}px from existing, {time_gap:.2f}s ago"
+
         return False, None
 
     def _process_video_blocking(
@@ -182,7 +187,8 @@ class YoloDetector(BaseDetector):
             tracker_history = defaultdict(lambda: deque(maxlen=50))
             confirmed = {}
             counted_ids = {cls: set() for cls in ALL_CLASSES}
-            spatial_locations = []
+            # Per-class time-windowed deque — O(1) pruning, O(R) scan (R = recent same-class entries)
+            spatial_locations = defaultdict(deque)
             tracker_class_lock = {}
             # Pending verification futures: tid -> {future, detection_info}
             pending_verify = {}
@@ -220,12 +226,8 @@ class YoloDetector(BaseDetector):
                 }
                 if class_name in counted_ids:
                     counted_ids[class_name].add(tid)
-                spatial_locations.append(
-                    {
-                        "center": (cx, cy),
-                        "time": current_time,
-                        "class": class_name,
-                    }
+                spatial_locations[class_name].append(
+                    {"center": (cx, cy), "time": current_time}
                 )
                 rejection_stats["multi_frame_pending"].discard(tid)
 
@@ -320,7 +322,8 @@ class YoloDetector(BaseDetector):
                 tracker_class_lock, and tracker_history whose tid hasn't been
                 seen for more than TIME_THRESHOLD seconds."""
                 stale_tids = [
-                    tid for tid, last_t in _tid_last_seen.items()
+                    tid
+                    for tid, last_t in _tid_last_seen.items()
                     if current_time - last_t > TIME_THRESHOLD
                     and tid not in confirmed
                     and tid not in pending_verify
@@ -357,14 +360,15 @@ class YoloDetector(BaseDetector):
 
             # Stream frame data to NDJSON temp file instead of unbounded list
             _ndjson_fd = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".ndjson", prefix=f"frames_{video_id}_",
-                dir=str(RESULTS_DIR), delete=False,
+                mode="w",
+                suffix=".ndjson",
+                prefix=f"frames_{video_id}_",
+                dir=str(RESULTS_DIR),
+                delete=False,
             )
             _ndjson_path = _ndjson_fd.name
             _frames_written = 0
-            logger.info(
-                f"NDJSON streaming enabled — temp file: {_ndjson_path}"
-            )
+            logger.info(f"NDJSON streaming enabled — temp file: {_ndjson_path}")
             total_detections_count = 0
             frame_count = 0
             last_progress = 0
@@ -670,7 +674,9 @@ class YoloDetector(BaseDetector):
                 "damaged_road_marking_list": damaged_road_marking_list,
                 "good_sign_board_list": good_sign_board_list,
                 # Read back streamed frames from NDJSON temp file
-                "frames": self._read_ndjson_frames(_ndjson_fd, _ndjson_path, _frames_written),
+                "frames": self._read_ndjson_frames(
+                    _ndjson_fd, _ndjson_path, _frames_written
+                ),
             }
 
             detection_results[video_id] = results
@@ -781,7 +787,9 @@ class YoloDetector(BaseDetector):
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     @staticmethod
-    def _read_ndjson_frames(ndjson_fd, ndjson_path: str, expected_count: int = 0) -> list:
+    def _read_ndjson_frames(
+        ndjson_fd, ndjson_path: str, expected_count: int = 0
+    ) -> list:
         """Close the NDJSON temp file and read all frame lines back as a list."""
         if not ndjson_fd.closed:
             ndjson_fd.close()

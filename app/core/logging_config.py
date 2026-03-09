@@ -177,6 +177,7 @@ def setup_logging():
         "app.services.upload_service",
         "app.services.location_mapper",
         "app.helpers",
+        "app.ws",
     ]
 
     for logger_name in _DETECTION_PARENT_LOGGERS:

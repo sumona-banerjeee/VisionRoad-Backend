@@ -93,9 +93,16 @@ async def websocket_endpoint(websocket: WebSocket, video_id: str):
     await manager.connect(video_id, websocket)
 
     try:
-        # Send initial status if available
+        # Send current state snapshot on connect
         if video_id in processing_status:
-            await websocket.send_json({"type": "status", **processing_status[video_id]})
+            s = processing_status[video_id]
+            await websocket.send_json(
+                {
+                    "type": "progress",
+                    "job_status": s.get("status", "processing"),
+                    "progress": s.get("progress", 0),
+                }
+            )
 
         # Keep connection alive and wait for processing to complete
         while True:
@@ -103,10 +110,7 @@ async def websocket_endpoint(websocket: WebSocket, video_id: str):
             if video_id in processing_status:
                 status = processing_status[video_id]["status"]
                 if status in ["completed", "error"]:
-                    # Send final status and close gracefully
-                    await websocket.send_json(
-                        {"type": "status", **processing_status[video_id]}
-                    )
+                    # Detector already pushed complete/error — just close cleanly
                     break
 
             # Keep connection alive with a ping/pong mechanism

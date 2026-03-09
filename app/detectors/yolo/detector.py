@@ -82,7 +82,20 @@ class YoloDetector(BaseDetector):
         try:
             asyncio.run_coroutine_threadsafe(
                 manager.send_message(
-                    video_id, {"type": "status", "status": "processing", "progress": 0}
+                    video_id,
+                    {
+                        "type": "progress",
+                        "job_status": "processing",
+                        "progress": 0,
+                        "counts": {
+                            "pothole": 0,
+                            "defected_sign_board": 0,
+                            "road_crack": 0,
+                            "damaged_road_marking": 0,
+                            "good_sign_board": 0,
+                            "total_road_damage": 0,
+                        },
+                    },
                 ),
                 loop,
             )
@@ -142,6 +155,10 @@ class YoloDetector(BaseDetector):
             total_detections_count = 0
             frame_count = 0
             last_progress = 0
+            last_progress_time = time.time()  # for hybrid time-based trigger
+            PROGRESS_INTERVAL_S = float(
+                os.getenv("PROGRESS_INTERVAL_S", "10")
+            )  # max seconds between updates
 
             # ── Main loop ────────────────────────────────────────────────
             while cap.isOpened():
@@ -201,32 +218,40 @@ class YoloDetector(BaseDetector):
                             f" NDJSON streamed {_frames_written} frames to disk so far"
                         )
 
-                # ── Progress ─────────────────────────────────────────────
+                # ── Progress — hybrid: every 5% OR every PROGRESS_INTERVAL_S ──
                 progress = int((frame_count / total_frames) * 100)
-                if progress - last_progress >= 5:
+                elapsed_since_progress = time.time() - last_progress_time
+                if (
+                    progress - last_progress >= 5
+                    or elapsed_since_progress >= PROGRESS_INTERVAL_S
+                ):
                     self._send_progress(
                         video_id,
                         progress,
                         loop,
                         {
-                            "unique_pothole": len(state.counted_ids["pothole"]),
-                            "unique_defected_sign_board": len(
-                                state.counted_ids["defected_sign_board"]
-                            ),
-                            "unique_road_crack": len(state.counted_ids["road_crack"]),
-                            "unique_damaged_road_marking": len(
-                                state.counted_ids["damaged_road_marking"]
-                            ),
-                            "unique_good_sign_board": len(
-                                state.counted_ids["good_sign_board"]
-                            ),
-                            "total_road_damage": sum(
-                                len(state.counted_ids[c]) for c in ROAD_DAMAGE_CLASSES
-                            ),
-                            "total_detections": total_detections_count,
+                            "job_status": "processing",
+                            "counts": {
+                                "pothole": len(state.counted_ids["pothole"]),
+                                "defected_sign_board": len(
+                                    state.counted_ids["defected_sign_board"]
+                                ),
+                                "road_crack": len(state.counted_ids["road_crack"]),
+                                "damaged_road_marking": len(
+                                    state.counted_ids["damaged_road_marking"]
+                                ),
+                                "good_sign_board": len(
+                                    state.counted_ids["good_sign_board"]
+                                ),
+                                "total_road_damage": sum(
+                                    len(state.counted_ids[c])
+                                    for c in ROAD_DAMAGE_CLASSES
+                                ),
+                            },
                         },
                     )
                     last_progress = progress
+                    last_progress_time = time.time()
                     state.evict_stale_trackers(current_time)
 
             yolo_end = time.time()
@@ -296,9 +321,24 @@ class YoloDetector(BaseDetector):
                     video_id,
                     {
                         "type": "complete",
-                        "status": "completed",
-                        "summary": results_dict["summary"],
-                        "rejection_stats": results_dict["rejection_stats"],
+                        "progress": 100,
+                        "job_status": "completed",
+                        "counts": {
+                            "pothole": len(state.counted_ids["pothole"]),
+                            "defected_sign_board": len(
+                                state.counted_ids["defected_sign_board"]
+                            ),
+                            "road_crack": len(state.counted_ids["road_crack"]),
+                            "damaged_road_marking": len(
+                                state.counted_ids["damaged_road_marking"]
+                            ),
+                            "good_sign_board": len(
+                                state.counted_ids["good_sign_board"]
+                            ),
+                            "total_road_damage": sum(
+                                len(state.counted_ids[c]) for c in ROAD_DAMAGE_CLASSES
+                            ),
+                        },
                     },
                 ),
                 loop,
@@ -309,7 +349,10 @@ class YoloDetector(BaseDetector):
             logger.error(f"Error processing {video_id}: {e}")
             processing_status[video_id] = {"status": "error", "message": str(e)}
             asyncio.run_coroutine_threadsafe(
-                manager.send_message(video_id, {"type": "error", "message": str(e)}),
+                manager.send_message(
+                    video_id,
+                    {"type": "error", "job_status": "error", "message": str(e)},
+                ),
                 loop,
             )
             raise

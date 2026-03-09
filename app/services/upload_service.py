@@ -147,10 +147,9 @@ class UploadService:
         await manager.send_message(
             video_id,
             {
-                "type": "status",
-                "status": "queued",
+                "type": "progress",
+                "job_status": "processing",
                 "progress": 0,
-                "message": "Video uploaded, starting processing...",
             },
         )
 

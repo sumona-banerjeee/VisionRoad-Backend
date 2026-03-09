@@ -145,17 +145,15 @@ def setup_logging():
     root_logger.addHandler(error_handler)
 
     # ── Detection-specific loggers ───────────────────────────────────────────
-    # Updated to match the actual module structure used by the codebase.
-    # Guard with _has_handler_for_file() to survive hot-reloads.
-    # propagate=False so entries don't also appear in visionroad.log.
-    _DETECTION_LOGGERS = [
-        "app.detectors.yolo.detector",  # primary YOLO detector
-        "app.detectors.base.base_detector",  # shared base class
-        "app.services.upload_service",  # upload + pipeline kick-off
-        "app.services.location_mapper",  # GPS coord lookup
-        "app.helpers.vl_helper",  # VL API calls (was leaking into visionroad.log)
-        "app.helpers.sam3_helper",  # SAM3 helper
-    ]
+    # Prefix-based: any module under these namespaces auto-routes to
+    # detection.log. No need to hardcode individual module names — new
+    # sub-modules are picked up automatically.
+    _DETECTION_PREFIXES = (
+        "app.detectors.",  # all detector modules (yolo/*, base/*)
+        "app.services.upload",  # upload + pipeline kick-off
+        "app.services.location",  # GPS coord lookup
+        "app.helpers.",  # VL, SAM3, future helpers
+    )
 
     detection_handler = logging.handlers.RotatingFileHandler(
         DETECTION_LOG_FILE,
@@ -166,24 +164,36 @@ def setup_logging():
     detection_handler.setLevel(logging.DEBUG)
     detection_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
 
-    for logger_name in _DETECTION_LOGGERS:
+    class _DetectionRoutingFilter(logging.Filter):
+        """Route detection-namespace logs to detection.log instead of root."""
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            return record.name.startswith(_DETECTION_PREFIXES)
+
+    # Attach the filter + handler at the parent namespace level so all
+    # child loggers inherit it automatically.
+    _DETECTION_PARENT_LOGGERS = [
+        "app.detectors",
+        "app.services.upload_service",
+        "app.services.location_mapper",
+        "app.helpers",
+    ]
+
+    for logger_name in _DETECTION_PARENT_LOGGERS:
         det_logger = logging.getLogger(logger_name)
         det_logger.setLevel(logging.DEBUG)
         det_logger.propagate = False  # no bleed into visionroad.log
 
-        # only add handler if not already attached (survives reload)
         if not _has_handler_for_file(det_logger, DETECTION_LOG_FILE):
             det_logger.addHandler(detection_handler)
 
-        # Still forward ERRORs to the shared error.log via root propagation
-        # is disabled, so we attach the error handler directly.
+        # Forward ERRORs to error.log (propagation is off, so attach directly)
         if not _has_handler_for_file(det_logger, ERROR_LOG_FILE):
             det_logger.addHandler(error_handler)
 
-    # In development, also stream detection logs to the console so we can
-    # monitor YOLO/VL progress in real time without tailing a file.
+    # In development, also stream detection logs to the console
     if os.getenv("APP_ENV", "development") != "production":
-        for logger_name in _DETECTION_LOGGERS:
+        for logger_name in _DETECTION_PARENT_LOGGERS:
             dev_logger = logging.getLogger(logger_name)
             if console_handler not in dev_logger.handlers:
                 dev_logger.addHandler(console_handler)

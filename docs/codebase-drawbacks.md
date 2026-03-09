@@ -154,6 +154,76 @@ This list comprehension runs for every tracked object on every processed frame. 
 
 ---
 
+## 🟠 Newly Identified Issues
+
+### 13. `tracker_history` List Comprehension Still Runs on Every Detected Object
+**File:** `app/detectors/yolo/detector.py` (line 443)
+
+```python
+recent = [t for t in tracker_history[tid] if current_time - t <= DETECTION_TIME_WINDOW]
+```
+
+Although `tracker_history` is a `deque(maxlen=50)`, this full list comprehension still runs for **every tracked object on every processed frame**. The deque's maxlen prevents unbounded growth, but the scan is still O(50) per detection per frame, not O(1).
+
+**Fix:** Store only the first-seen timestamp and a frame counter per `tid`. Drop the deque entirely for confirmation logic.
+
+---
+
+### 14. `_save_to_db` Opens a New DB Session Every Time
+**File:** `app/detectors/yolo/detector.py` (line 842)
+
+```python
+def _save_to_db(self, video_id, all_detections, perf_timings=None):
+    db = SessionLocal()
+```
+
+`_save_to_db` creates a fresh `SessionLocal()` instead of accepting the DB session that is already open in the upload path. This creates a second connection, bypasses any session-level transaction state, and is fragile — if an exception occurs before `db.close()`, the connection leaks.
+
+**Fix:** Pass the existing `db: Session` as a parameter, or use a `with SessionLocal() as db:` context manager.
+
+---
+
+### 15. `location.package.project_id` Causes N+1 Lazy-Load in `_save_to_db`
+**File:** `app/detectors/yolo/detector.py` (line 858)
+
+```python
+if location.package:
+    project_id = location.package.project_id
+```
+
+For every detection that has a location match, SQLAlchemy lazy-loads the `Package` row separately (`SELECT ... FROM packages WHERE id = ?`). With 50 detections, that's 50 extra round-trips to the DB.
+
+**Fix:** Use `joinedload(Location.package)` when calling `find_location_by_gps`, or store `project_id` directly on the `Location` model (denormalize).
+
+---
+
+### 16. Summary Routes Load All Detections Into Python Memory
+**File:** `app/routes/summary_routes.py` (lines 56, 138, 201)
+
+```python
+detections = query.all()   # all rows for a project / package / location
+```
+
+`get_project_summary` and `get_package_summary` load every detection row into Python, then build the response dict by looping in Python. For a project with thousands of detections, this is a large memory allocation and a slow response.
+
+**Fix:** Use `GROUP BY` + `COUNT` aggregation at the SQL level for the counts. Only fetch individual detection rows when the client explicitly requests them (e.g., paginated detail endpoint).
+
+---
+
+### 17. `get_location_summary` Makes Two Separate DB Queries for the Same Scope
+**File:** `app/routes/summary_routes.py` (lines 195–209)
+
+```python
+detections = query.all()                          # query 1 — all rows
+detection_counts = db.query(...).group_by(...).all()  # query 2 — same rows, aggregated
+```
+
+Two separate SQL queries are made for the same `location_id` scope: one fetches every row, the other counts them by type. The count query is redundant since the same information can be derived from the first result set.
+
+**Fix:** Remove the second query. Compute `by_type` counts from `detections` in Python using `collections.Counter`, or consolidate into a single SQL query with both the rows and aggregates.
+
+---
+
 ## Summary
 
 | Priority | Issue | Impact |
@@ -170,6 +240,11 @@ This list comprehension runs for every tracked object on every processed frame. 
 | 🟡 Medium | No file cleanup | Disk exhaustion |
 | 🟡 Medium | Duplicated detector logic | Maintenance burden |
 | 🟡 Medium | Per-frame tracker history scan | Minor CPU overhead |
+| 🟠 High | tracker_history list comp per detected object | Wasted CPU every frame |
+| 🟠 High | `_save_to_db` opens new DB session | Connection leak risk |
+| 🟠 High | N+1 lazy-load of `location.package` in DB save | 50+ hidden queries per video |
+| 🟡 Medium | Summary routes: all detections loaded into Python | High memory on large datasets |
+| 🟡 Medium | `get_location_summary` double-queries same scope | Redundant DB round-trip |
 
 ### Recommended v2 Priority Order
 

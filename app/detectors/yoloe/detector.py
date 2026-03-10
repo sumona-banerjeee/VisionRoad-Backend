@@ -39,8 +39,7 @@ from app.helpers.yoloe_helper import (
 
 logger = logging.getLogger(__name__)
 
-# Performance tuning
-FRAME_SKIP = int(os.getenv("YOLOE_FRAME_SKIP", "2"))
+# YOLOE processes every frame (no skipping) to match test file behavior
 
 
 class YoloeDetector(BaseDetector):
@@ -126,18 +125,13 @@ class YoloeDetector(BaseDetector):
                 f"{total_frames} frames @ {fps:.1f} FPS"
             )
             logger.info(
-                f"YOLOE settings: FRAME_SKIP={FRAME_SKIP}, "
-                f"CONF={YOLOE_CONF_THRESHOLD}"
+                f"YOLOE settings: FRAME_SKIP=1 (every frame), "
+                f"CONF={YOLOE_CONF_THRESHOLD}, dedup=OFF"
             )
 
-            # Adaptive deduplication parameters
-            TIME_THRESHOLD = video_duration * 0.30
-            MIN_DISTANCE_THRESHOLD = 120
-
-            # Tracking structures
+            # Tracking structures (no spatial dedup — every detection is kept)
             confirmed = {}
             counted_ids = {cls: set() for cls in ALL_CLASSES}
-            spatial_locations = []
             next_det_id = 0  # Simple incrementing ID (no tracker IDs)
 
             # NDJSON streaming to temp file (memory efficient)
@@ -165,10 +159,6 @@ class YoloeDetector(BaseDetector):
 
                 frame_count += 1
 
-                # Frame skipping
-                if FRAME_SKIP > 1 and frame_count % FRAME_SKIP != 0:
-                    continue
-
                 current_time = frame_count / fps
 
                 # ── YOLOE inference via helper ───────────────────────────────
@@ -186,29 +176,7 @@ class YoloeDetector(BaseDetector):
                     x1, y1, x2, y2 = det["bbox"]
                     conf = det["confidence"]
 
-                    # ── Spatial deduplication ─────────────────────────────────
-                    is_dup = False
-                    for existing in spatial_locations:
-                        prev_cx, prev_cy = existing["center"]
-                        prev_class = existing["class"]
-                        prev_time = existing["time"]
-                        distance = (
-                            (cx - prev_cx) ** 2 + (cy - prev_cy) ** 2
-                        ) ** 0.5
-                        time_gap = current_time - prev_time
-
-                        if (
-                            prev_class == class_name
-                            and distance < MIN_DISTANCE_THRESHOLD
-                            and time_gap < TIME_THRESHOLD
-                        ):
-                            is_dup = True
-                            break
-
-                    if is_dup:
-                        continue
-
-                    # ── Confirm detection ─────────────────────────────────────
+                    # ── Record every detection (no dedup) ─────────────────────
                     det_id = next_det_id
                     next_det_id += 1
 
@@ -226,13 +194,6 @@ class YoloeDetector(BaseDetector):
                     }
                     if class_name in counted_ids:
                         counted_ids[class_name].add(det_id)
-                    spatial_locations.append(
-                        {
-                            "center": (cx, cy),
-                            "time": current_time,
-                            "class": class_name,
-                        }
-                    )
 
                     total_detections_count += 1
                     frame_data["detections"].append(
@@ -383,9 +344,7 @@ class YoloeDetector(BaseDetector):
 
             # ── Perf report ──────────────────────────────────────────────────
             total_time = process_end - process_start
-            frames_processed = (
-                frame_count // FRAME_SKIP if FRAME_SKIP > 1 else frame_count
-            )
+            frames_processed = frame_count
 
             def _fmt(stage_key):
                 d = perf_timings[stage_key]
@@ -414,7 +373,7 @@ class YoloeDetector(BaseDetector):
                 f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
                 f"  {'TOTAL pipeline time':<30} {total_time:>10.3f}s",
                 f"  {'Video duration':<30} {video_duration:>10.1f}s  ({total_frames} frames @ {fps:.0f} FPS)",
-                f"  {'Frames processed':<30} {frames_processed:>10d}  (FRAME_SKIP={FRAME_SKIP})",
+                f"  {'Frames processed':<30} {frames_processed:>10d}  (every frame)",
                 f"  {'Detections saved':<30} {len(all_detections_flat):>10d}",
                 f"{'=' * 78}",
             ]

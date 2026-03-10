@@ -107,3 +107,8 @@ pip-delete-this-directory.txt
 *.tmp
 *.temp
 *.bak
+
+
+
+mobileclip_blt.ts
+yoloe-11m-seg.pt

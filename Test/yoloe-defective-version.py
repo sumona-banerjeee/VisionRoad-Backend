@@ -27,8 +27,8 @@ MODEL_WEIGHTS = "yoloe-11m-seg.pt"
 # ── Input / Output paths ──
 # Set these to run directly: python Test/yoloe.py
 # CLI args override these if provided.
-INPUT_SOURCE = r"Test\video\live-vid-2.mp4"   # image or video path
-OUTPUT_PATH  = r"C:\Users\Administrator\Desktop\AiML\Sumona\VisionRoad-Backend\Test\output\output-1(yoloe).mp4"     # save annotated output here
+INPUT_SOURCE = r"Test\video\live-vid-4.mp4"   # image or video path
+OUTPUT_PATH  = r"C:\Users\Administrator\Desktop\AiML\Sumona\VisionRoad-Backend\Test\output\output-4(yoloe-defective-version).mp4"     # save annotated output here
 
 # Open-vocabulary text prompts — what to detect
 # Target classes (these are the defects we care about)
@@ -59,12 +59,35 @@ CONTRASTIVE_PROMPTS = [
     "advertisement board",
 ]
 
-
 # Combined prompts sent to model (target first, then contrastive)
 PROMPTS = TARGET_PROMPTS + CONTRASTIVE_PROMPTS
 
 # Only show detections for the first N classes (target classes)
 NUM_TARGET_CLASSES = len(TARGET_PROMPTS)
+
+# ── Display filter ──────────────────────────────────────────────────────────
+# Indices (within TARGET_PROMPTS) that represent DEFECTIVE / DAMAGED items.
+# ALL prompts above are kept intact — they help the model's open-vocabulary
+# understanding and contrastive reasoning.
+# This set only controls what gets drawn on the output frame.
+# Classes NOT listed here (advertisements, good signs, etc.) are detected
+# internally but silently suppressed in the visual output.
+DEFECTIVE_CLASS_INDICES = {
+    TARGET_PROMPTS.index("damaged traffic signboard"),
+    TARGET_PROMPTS.index("broken traffic signboard"),
+    TARGET_PROMPTS.index("faded colorless white blank signboard"),
+    TARGET_PROMPTS.index("rusted signboard"),
+    TARGET_PROMPTS.index("pothole"),
+    TARGET_PROMPTS.index("puddle"),
+    TARGET_PROMPTS.index("road crack"),
+    TARGET_PROMPTS.index("damaged road marking"),
+    TARGET_PROMPTS.index("damaged circular round traffic sign"),
+    TARGET_PROMPTS.index("faded circular round traffic sign"),
+    TARGET_PROMPTS.index("broken circular round traffic sign"),
+    # "advertisement poster", "commercial billboard", "banner", "shop sign",
+    # "building nameplate", "clean intact traffic sign"  ← intentionally excluded
+}
+# ───────────────────────────────────────────────────────────────────────────
 
 # Confidence threshold for detections
 CONFIDENCE_THRESHOLD = 0.43
@@ -80,8 +103,12 @@ CLASS_COLOURS = [
     (0, 255, 255),   # Yellow  — faded colorless blank signboard
     (0, 165, 255),   # Gold    — rusted signboard
     (255, 0, 255),   # Magenta — pothole
-    (255, 255, 0),   # Cyan    — road crack
-    (255, 0, 0),     # Blue    — damaged road marking
+    (255, 255, 0),   # Cyan    — puddle
+    (255, 0, 0),     # Blue    — road crack
+    (128, 0, 255),   # Purple  — damaged road marking
+    (0, 80, 255),    # Red-Org — damaged circular sign
+    (0, 200, 255),   # Yellow  — faded circular sign
+    (200, 100, 255), # Pink    — broken circular sign
 ]
 
 
@@ -110,6 +137,11 @@ def draw_detections(frame, results):
     """
     Draw bounding boxes and labels on the frame.
 
+    Only detections whose class index appears in DEFECTIVE_CLASS_INDICES
+    are drawn. All other detections (ads, good signs, contrastive classes)
+    are skipped silently — the prompts themselves are NOT removed, as they
+    improve the model's open-vocabulary discrimination.
+
     Parameters
     ----------
     frame  : numpy array (BGR image)
@@ -118,7 +150,7 @@ def draw_detections(frame, results):
     Returns
     -------
     annotated_frame : numpy array with drawn detections
-    count           : number of detections
+    count           : number of defective detections drawn
     """
     count = 0
     if results.boxes is not None and len(results.boxes) > 0:
@@ -130,8 +162,13 @@ def draw_detections(frame, results):
         names = results.names  # dict {class_id: class_name}
 
         for box, conf, cls_id in zip(boxes, confs, class_ids):
-            # Skip contrastive classes — only draw target classes
+            # ── Filter 1: skip contrastive classes ──────────────────────────
             if cls_id >= NUM_TARGET_CLASSES:
+                continue
+
+            # ── Filter 2: skip non-defective target classes ─────────────────
+            # (advertisements, good/intact signs, etc.)
+            if cls_id not in DEFECTIVE_CLASS_INDICES:
                 continue
 
             x1, y1, x2, y2 = map(int, box)
@@ -189,7 +226,7 @@ def detect_image(model: YOLOE, image_path: str, save_path: str | None = None):
 
     # Draw detections (results is a list; take the first element)
     annotated, det_count = draw_detections(img, results[0])
-    print(f"[INFO] Detections found: {det_count}")
+    print(f"[INFO] Defective detections found: {det_count}")
 
     # Save annotated image
     if save_path:
@@ -265,12 +302,12 @@ def detect_video(
             # Run inference
             results = model.predict(frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
 
-            # Draw detections
+            # Draw defective detections only
             annotated, det_count = draw_detections(frame, results[0])
             total_detections += det_count
 
             # Add frame info overlay
-            info_text = f"Frame: {frame_num}/{total_frames}  |  Detections: {det_count}"
+            info_text = f"Frame: {frame_num}/{total_frames}  |  Defects: {det_count}"
             cv2.putText(
                 annotated,
                 info_text,
@@ -306,7 +343,7 @@ def detect_video(
             writer.release()
         cv2.destroyAllWindows()
 
-    print(f"\n[DONE] Processed {frame_num} frames, total detections: {total_detections}")
+    print(f"\n[DONE] Processed {frame_num} frames, total defective detections: {total_detections}")
 
 
 # ──────────────────────────────────────────────
@@ -369,44 +406,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Open-vocabulary text prompts — what to detect
-# PROMPTS = [
-#     "defective traffic signboard",
-#     "Good Signboard"
-#     "broken traffic signboard",
-#     "pothole",
-#     "road crack",
-#     "damaged road marking",
-#     "puddle",
-# ]
-
-# PROMPTS = [
-#     "bent or rusted metal traffic signboard",
-#     "faded road traffic signboard",
-#     "broken traffic signboard",
-#     "cracked road signboard",
-#     "pothole",
-#     "road crack",
-#     "damaged road marking",
-#     "puddle",
-#     "advertisement board"
-# ]

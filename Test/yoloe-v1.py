@@ -1,6 +1,6 @@
 """
 YOLOE - Open Vocabulary Real-Time Object Detection
-Detects: defective signboards, potholes, road damage from images and videos.
+Detects: signboards (good/damaged), potholes, puddles, road damage from images and videos.
 
 Uses Ultralytics YOLOE with text prompts (open-vocabulary detection).
 Docs: https://docs.ultralytics.com/models/yoloe/
@@ -10,7 +10,6 @@ import cv2
 import sys
 import os
 import argparse
-from datetime import datetime
 from ultralytics import YOLOE
 
 
@@ -21,67 +20,114 @@ from ultralytics import YOLOE
 # YOLOE model weights (auto-downloaded on first run)
 # Options: yoloe-11s-seg.pt, yoloe-11m-seg.pt, yoloe-11l-seg.pt
 #          yoloe-v8s-seg.pt, yoloe-v8m-seg.pt, yoloe-v8l-seg.pt
-# MODEL_WEIGHTS = "yoloe-11l-seg.pt"
 MODEL_WEIGHTS = "yoloe-11m-seg.pt"
 
 # ── Input / Output paths ──
-# Set these to run directly: python Test/yoloe.py
-# CLI args override these if provided.
-INPUT_SOURCE = r"Test\video\live-vid-2.mp4"   # image or video path
-OUTPUT_PATH  = r"C:\Users\Administrator\Desktop\AiML\Sumona\VisionRoad-Backend\Test\output\output-1(yoloe).mp4"     # save annotated output here
+INPUT_SOURCE = r"Test\video\live-vid-2.mp4"
+OUTPUT_PATH  = r"C:\Users\Administrator\Desktop\AiML\Sumona\VisionRoad-Backend\Test\output\output-5(yoloe-v1).mp4"
 
-# Open-vocabulary text prompts — what to detect
-# Target classes (these are the defects we care about)
+# ── Open-vocabulary text prompts ──
 TARGET_PROMPTS = [
-    "damaged traffic signboard",
-    "broken traffic signboard",
-    "faded colorless white blank signboard",
-    "rusted signboard",
-    "pothole",
-    "puddle",
-    "road crack",
-    "damaged road marking",
-    "damaged circular round traffic sign",
-    "faded circular round traffic sign", 
-    "broken circular round traffic sign",
-    "advertisement poster", 
-    "commercial billboard", 
-    "banner", "shop sign", 
-    "building nameplate",
-    "clean intact traffic sign",
+    # ── Intact / Good Signboards ──
+    "clean traffic sign on pole",
+    "intact road sign on metal post",
+    "visible traffic signboard on road",
+    "good condition municipal road sign",          # Indian municipal context
+
+    # ── Triangular Warning Signs ──  ← NEW CATEGORY
+    "triangular warning traffic sign",
+    "faded triangular road sign red border",
+    "damaged triangle traffic sign on pole",
+    "weathered triangular signboard",
+
+    # ── Circular / Round Signs ──
+    "circular traffic sign on road",
+    "blank white circular traffic sign",           # covers Image 3
+    "faded erased circular road sign",             # covers Image 3 specifically
+    "shattered broken circular road sign",         # covers Image 2
+    "damaged convex road mirror sign",             # covers Image 2 specifically
+    "round prohibitory traffic sign",
+    "circular no parking sign",                    # covers Image 6 background
+
+    # ── Rectangular / Informational Signs ──      ← NEW CATEGORY
+    "rectangular road information sign",
+    "faded bus stop signboard",                    # covers Image 6
+    "faded rectangular traffic sign pole",
+    "blank white rectangular road sign",
+
+    # ── Damaged / Defective Signboards (General) ──
+    "damaged traffic signboard on road",
+    "broken traffic signboard on pole",
+    "faded traffic signboard on road",
+    "blank white faded signboard",
+    "rusted metal traffic sign",
+    "bent traffic sign pole",
+    "graffiti covered traffic sign",
+    "cracked traffic signboard",
+    "weathered signboard with peeling paint",      # NEW — covers Images 1, 5
+
+    # ── Commercial / Non-traffic Signboards ──
+    "roadside advertisement billboard",
+    "shop signboard near road",
+    "commercial banner on roadside",
+
+    # ── Road Defects ──
+    "pothole on asphalt road",
+    "deep road pothole",
+    "disintegrating road surface patch",           # NEW — covers Image 4
+    "loose gravel patch on road",                  # NEW — covers Image 4
+    "water puddle on asphalt road",
+    "standing water on road surface",
+    "longitudinal crack on asphalt",
+    "road surface crack",
+    "faded road lane marking",
+    "worn lane line on road",
 ]
 
-# Contrastive classes (helps model differentiate — we ignore these in output)
-CONTRASTIVE_PROMPTS = [
-    "normal traffic signboard",
-    "good signboard",
-    "non-defective signboard",
-    "advertisement board",
-]
-
-
-# Combined prompts sent to model (target first, then contrastive)
-PROMPTS = TARGET_PROMPTS + CONTRASTIVE_PROMPTS
-
-# Only show detections for the first N classes (target classes)
+# No contrastive prompts — removed entirely
+PROMPTS = TARGET_PROMPTS
 NUM_TARGET_CLASSES = len(TARGET_PROMPTS)
 
 # Confidence threshold for detections
-CONFIDENCE_THRESHOLD = 0.43
+CONFIDENCE_THRESHOLD = 0.65
 
 # Supported file extensions
 VIDEO_EXTENSIONS = (".mp4", ".avi", ".mkv", ".mov", ".wmv", ".webm", ".flv", ".m4v")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp")
 
-# Colours for each target class (BGR)
+# ── Colours per class (BGR) — names reflect rendered screen colour ──
 CLASS_COLOURS = [
-    (0, 0, 255),     # Red     — damaged traffic sign
-    (0, 128, 255),   # Orange  — broken traffic signboard
-    (0, 255, 255),   # Yellow  — faded colorless blank signboard
-    (0, 165, 255),   # Gold    — rusted signboard
-    (255, 0, 255),   # Magenta — pothole
-    (255, 255, 0),   # Cyan    — road crack
-    (255, 0, 0),     # Blue    — damaged road marking
+    # ── Good Signboards ──
+    (0, 255, 0),       # Lime Green       — clean intact traffic sign
+    (0, 220, 0),       # Medium Green     — clear visible road sign
+    (0, 180, 0),       # Dark Green       — good condition traffic signboard
+
+    # ── Damaged Signboards ──
+    (0, 0, 255),       # Red              — damaged traffic signboard
+    (0, 80, 255),      # Orange-Red       — broken traffic signboard
+    (0, 200, 255),     # Yellow           — faded colorless blank signboard
+    (0, 140, 255),     # Orange           — rusted signboard
+    (0, 60, 200),      # Dark Orange-Red  — bent traffic signboard
+    (60, 0, 200),      # Dark Red-Purple  — graffiti covered signboard
+    (0, 30, 180),      # Dark Red         — cracked traffic sign
+
+    # ── Circular Signs ──
+    (180, 0, 180),     # Magenta          — damaged circular round sign
+    (200, 0, 140),     # Deep Pink        — faded circular round sign
+    (220, 0, 100),     # Crimson Pink     — broken circular round sign
+    (100, 200, 255),   # Light Yellow     — clean circular round sign
+
+    # ── Commercial Boards ──
+    (0, 215, 255),     # Gold             — advertisement billboard
+    (0, 200, 220),     # Dark Yellow      — shop sign board
+    (0, 180, 200),     # Olive Yellow     — building nameplate
+    (0, 160, 180),     # Dark Olive       — commercial banner
+
+    # ── Road Defects ──
+    (255, 0, 255),     # Magenta-Pink     — pothole
+    (255, 200, 0),     # Sky Blue         — puddle on road
+    (255, 255, 0),     # Cyan             — road crack
+    (255, 100, 0),     # Azure Blue       — damaged road marking
 ]
 
 
@@ -93,9 +139,6 @@ def load_model(weights: str = MODEL_WEIGHTS) -> YOLOE:
     """Load YOLOE model and set open-vocabulary classes."""
     print(f"[INFO] Loading YOLOE model: {weights}")
     model = YOLOE(weights)
-
-    # Set the text prompts (open-vocabulary classes)
-    # This only needs to be called once after loading the model.
     model.set_classes(PROMPTS)
     print(f"[INFO] Classes set: {PROMPTS}")
     return model
@@ -122,33 +165,31 @@ def draw_detections(frame, results):
     """
     count = 0
     if results.boxes is not None and len(results.boxes) > 0:
-        boxes = results.boxes.xyxy.cpu().numpy()       # (N, 4) — x1, y1, x2, y2
-        confs = results.boxes.conf.cpu().numpy()        # (N,)
-        class_ids = results.boxes.cls.cpu().numpy().astype(int)  # (N,)
-
-        # Map class ids to names
-        names = results.names  # dict {class_id: class_name}
+        boxes     = results.boxes.xyxy.cpu().numpy()
+        confs     = results.boxes.conf.cpu().numpy()
+        class_ids = results.boxes.cls.cpu().numpy().astype(int)
+        names     = results.names  # dict {class_id: class_name}
 
         for box, conf, cls_id in zip(boxes, confs, class_ids):
-            # Skip contrastive classes — only draw target classes
+            # Skip anything outside our target classes
             if cls_id >= NUM_TARGET_CLASSES:
                 continue
 
             x1, y1, x2, y2 = map(int, box)
             colour = get_colour(cls_id)
-            label = names.get(cls_id, f"class_{cls_id}")
+            label  = names.get(cls_id, f"class_{cls_id}")
 
-            # Draw bounding box
+            # Bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 2)
 
-            # Draw label background
+            # Label background
             label_text = f"{label}: {conf:.2f}"
             (tw, th), _ = cv2.getTextSize(
                 label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2
             )
             cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw, y1), colour, -1)
 
-            # Draw label text
+            # Label text
             cv2.putText(
                 frame,
                 label_text,
@@ -184,20 +225,15 @@ def detect_image(model: YOLOE, image_path: str, save_path: str | None = None):
     print(f"\n[INFO] Running detection on image: {image_path}")
     img = cv2.imread(image_path)
 
-    # Run inference
     results = model.predict(img, conf=CONFIDENCE_THRESHOLD)
-
-    # Draw detections (results is a list; take the first element)
     annotated, det_count = draw_detections(img, results[0])
     print(f"[INFO] Detections found: {det_count}")
 
-    # Save annotated image
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         cv2.imwrite(save_path, annotated)
         print(f"[INFO] Saved annotated image → {save_path}")
 
-    # Display
     cv2.imshow("YOLOE - Image Detection", annotated)
     print("[INFO] Press any key to close the window...")
     cv2.waitKey(0)
@@ -220,11 +256,10 @@ def detect_video(
     Parameters
     ----------
     model      : loaded YOLOE model
-    video_path : path to input video (or 0 for webcam)
+    video_path : path to input video (or '0' for webcam)
     save_path  : optional path to save annotated video (.mp4)
     show       : whether to display frames in a window
     """
-    # Open video source
     source = 0 if video_path == "0" else video_path
     if isinstance(source, str) and not os.path.isfile(source):
         print(f"[ERROR] Video not found: {source}")
@@ -236,14 +271,12 @@ def detect_video(
         print("[ERROR] Could not open video.")
         return
 
-    # Get video properties
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps          = cap.get(cv2.CAP_PROP_FPS) or 30
+    width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     print(f"[INFO] Video: {width}x{height} @ {fps:.1f} FPS, {total_frames} frames")
 
-    # Video writer (optional)
     writer = None
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
@@ -251,7 +284,7 @@ def detect_video(
         writer = cv2.VideoWriter(save_path, fourcc, fps, (width, height))
         print(f"[INFO] Saving output video → {save_path}")
 
-    frame_num = 0
+    frame_num        = 0
     total_detections = 0
 
     try:
@@ -262,14 +295,11 @@ def detect_video(
 
             frame_num += 1
 
-            # Run inference
             results = model.predict(frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
-
-            # Draw detections
             annotated, det_count = draw_detections(frame, results[0])
             total_detections += det_count
 
-            # Add frame info overlay
+            # Frame info overlay
             info_text = f"Frame: {frame_num}/{total_frames}  |  Detections: {det_count}"
             cv2.putText(
                 annotated,
@@ -281,19 +311,16 @@ def detect_video(
                 2,
             )
 
-            # Write to output video
             if writer:
                 writer.write(annotated)
 
-            # Display
             if show:
                 cv2.imshow("YOLOE - Video Detection", annotated)
                 key = cv2.waitKey(1) & 0xFF
-                if key == 27 or key == ord("q"):  # ESC or Q to quit
+                if key == 27 or key == ord("q"):
                     print("[INFO] Stopped by user.")
                     break
 
-            # Progress log every 100 frames
             if frame_num % 100 == 0:
                 print(f"  [PROGRESS] Frame {frame_num}/{total_frames}")
 
@@ -315,7 +342,7 @@ def detect_video(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="YOLOE Open-Vocabulary Detection for Road Defects"
+        description="YOLOE Open-Vocabulary Detection — Signboards & Road Defects"
     )
     parser.add_argument(
         "source",
@@ -347,12 +374,12 @@ def main():
 
     args = parser.parse_args()
 
-    # Load model
-    model = load_model(args.weights)
+    # Use CLI confidence if provided
+    conf_threshold = args.conf
 
-    # Auto-detect source type based on file extension
+    model  = load_model(args.weights)
     source = args.source
-    ext = os.path.splitext(source)[1].lower()
+    ext    = os.path.splitext(source)[1].lower()
 
     if source == "0" or ext in VIDEO_EXTENSIONS:
         print(f"[INFO] Detected source type: VIDEO")
@@ -362,51 +389,10 @@ def main():
         detect_image(model, source, save_path=args.save)
     else:
         print(f"[ERROR] Unsupported file format: '{ext}'")
-        print(f"  Supported images: {', '.join(IMAGE_EXTENSIONS)}")
-        print(f"  Supported videos: {', '.join(VIDEO_EXTENSIONS)}")
+        print(f"  Supported images : {', '.join(IMAGE_EXTENSIONS)}")
+        print(f"  Supported videos : {', '.join(VIDEO_EXTENSIONS)}")
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Open-vocabulary text prompts — what to detect
-# PROMPTS = [
-#     "defective traffic signboard",
-#     "Good Signboard"
-#     "broken traffic signboard",
-#     "pothole",
-#     "road crack",
-#     "damaged road marking",
-#     "puddle",
-# ]
-
-# PROMPTS = [
-#     "bent or rusted metal traffic signboard",
-#     "faded road traffic signboard",
-#     "broken traffic signboard",
-#     "cracked road signboard",
-#     "pothole",
-#     "road crack",
-#     "damaged road marking",
-#     "puddle",
-#     "advertisement board"
-# ]

@@ -32,7 +32,7 @@ from app.db.crud_hierarchy import find_location_by_gps
 logger = logging.getLogger(__name__)
 
 # Configuration
-MODEL_PATH = "models/final-v1.pt"
+MODEL_PATH = "models/best-11m.pt"
 TRACKER = "botsort.yaml"
 CONF_THRESHOLD = 0.50
 

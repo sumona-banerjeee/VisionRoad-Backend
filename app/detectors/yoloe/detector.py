@@ -1,13 +1,19 @@
 """
-YoloeDetector — YOLOE open-vocabulary detection for road defects.
+YoloeDetector — YOLOE open-vocabulary detection with BoTSORT tracking.
 
-Uses the yoloe_helper module for model loading and per-frame inference.
-This detector handles the video processing loop, progress reporting,
-GPS matching, spatial deduplication, NDJSON streaming, and DB saving.
+Mirrors the YoloDetector flow exactly:
+  • BoTSORT tracking (model.track) for persistent track IDs
+  • Multi-frame confirmation (high-conf=1 frame, low-conf=2 frames)
+  • ROI filtering, tracker_class_lock, spatial deduplication
+  • Identical JSON output structure, progress reporting, perf timing
+  • GPS matching, NDJSON streaming, DB saving
 
-Unlike YoloDetector (which uses BoTSORT tracking), YOLOE runs pure
-per-frame prediction with no tracker. Spatial deduplication across
-frames prevents duplicate counts of the same physical defect.
+The only difference from YoloDetector is:
+  • Uses YOLOE model with open-vocabulary text prompts
+  • Post-tracking filtering: display label mapping, per-category confidence,
+    5 pothole post-detection filters (shadow/size/texture/aspect/brightness)
+
+Output classes: defected_sign_board, pothole
 """
 
 import cv2
@@ -19,7 +25,7 @@ import torch
 import os
 import tempfile
 from datetime import datetime
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from app.detectors.base.base_detector import BaseDetector, executor
 from app.ws.websocket_manager import manager
@@ -31,23 +37,33 @@ from app.models.detection import Detection
 from app.services.location_mapper import find_location_by_gps
 from app.helpers.yoloe_helper import (
     load_yoloe_model,
-    process_frame_with_yoloe,
+    get_display_label,
+    get_conf_threshold,
+    _run_pothole_filters,
     ROAD_DAMAGE_CLASSES,
     ALL_CLASSES,
     YOLOE_CONF_THRESHOLD,
+    YOLOE_CONF_SIGNBOARD,
+    YOLOE_CONF_POTHOLE,
+    NUM_TARGET_CLASSES,
 )
 
 logger = logging.getLogger(__name__)
 
-# YOLOE processes every frame (no skipping) to match test file behavior
+# Performance tuning — matches YoloDetector
+TRACKER = "botsort.yaml"
+FRAME_SKIP = int(os.getenv("FRAME_SKIP", "2"))
+YOLOE_IMGSZ = int(os.getenv("YOLOE_IMGSZ", "640"))
+USE_HALF = torch.cuda.is_available()
 
 
 class YoloeDetector(BaseDetector):
     """
-    YOLOE open-vocabulary detector.
+    YOLOE open-vocabulary detector with BoTSORT tracking.
 
-    Loads the YOLOE model via yoloe_helper and processes videos frame-by-frame.
-    Detections are mapped to standard backend class names for result consistency.
+    Uses the same tracking + confirmation + dedup pipeline as YoloDetector.
+    Detections are filtered through YOLOE-specific prompt mapping,
+    per-category confidence thresholds, and pothole post-detection filters.
     """
 
     def __init__(self):
@@ -87,8 +103,9 @@ class YoloeDetector(BaseDetector):
                 and distance < min_distance_threshold
                 and time_gap < time_threshold
             ):
-                return True
-        return False
+                reason = f"{distance:.1f}px from existing, {time_gap:.2f}s ago"
+                return True, reason
+        return False, None
 
     def _load_model(self):
         """Load YOLOE model via helper (lazy singleton)."""
@@ -157,19 +174,87 @@ class YoloeDetector(BaseDetector):
                 f"{total_frames} frames @ {fps:.1f} FPS"
             )
             logger.info(
-                f"YOLOE settings: FRAME_SKIP=1 (every frame), "
-                f"CONF={YOLOE_CONF_THRESHOLD}, dedup=OFF"
+                f"YOLOE settings: FRAME_SKIP={FRAME_SKIP}, IMGSZ={YOLOE_IMGSZ}, "
+                f"FP16={'ON' if USE_HALF else 'OFF'}, TRACKER={TRACKER}, "
+                f"CONF_SIGN={YOLOE_CONF_SIGNBOARD}, CONF_POT={YOLOE_CONF_POTHOLE}"
             )
 
-            # Adaptive parameters (dedup)
+            # Adaptive parameters (same as YoloDetector)
+            DETECTION_TIME_WINDOW = video_duration * 0.25
             TIME_THRESHOLD = video_duration * 0.30
+            HIGH_CONFIDENCE_THRESHOLD = 0.75
+            LOW_CONFIDENCE_MIN_FRAMES = 2
             MIN_DISTANCE_THRESHOLD = 120
 
-            # Tracking structures
+            ROI_LEFT = 0
+            ROI_RIGHT = width
+            ROI_TOP = int(height * 0.05)
+            ROI_BOTTOM = int(height * 0.95)
+
+            # Tracking structures (same as YoloDetector)
+            tracker_history = defaultdict(lambda: deque(maxlen=50))
             confirmed = {}
             counted_ids = {cls: set() for cls in ALL_CLASSES}
             spatial_locations = []
-            next_det_id = 0  # Simple incrementing ID (no tracker IDs)
+            tracker_class_lock = {}
+            _tid_last_seen = {}
+
+            def _confirm_detection(
+                tid, class_name, frame_count, current_time, conf,
+                x1, y1, x2, y2, cx, cy,
+            ):
+                """Helper to confirm a detection and update all tracking structures."""
+                confirmed[tid] = {
+                    "detection_id": tid,
+                    "type": class_name,
+                    "first_detected_frame": frame_count,
+                    "first_detected_time": round(current_time, 2),
+                    "confidence": round(float(conf), 3),
+                    "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                    "vl_verified": None,
+                    "vl_confidence": None,
+                    "vl_category": None,
+                }
+                if class_name in counted_ids:
+                    counted_ids[class_name].add(tid)
+                spatial_locations.append(
+                    {
+                        "center": (cx, cy),
+                        "time": current_time,
+                        "class": class_name,
+                    }
+                )
+                rejection_stats["multi_frame_pending"].discard(tid)
+
+            def _evict_stale_trackers():
+                """Remove stale entries to bound memory."""
+                stale_tids = [
+                    tid for tid, last_t in _tid_last_seen.items()
+                    if current_time - last_t > TIME_THRESHOLD
+                    and tid not in confirmed
+                ]
+                for tid in stale_tids:
+                    tracker_class_lock.pop(tid, None)
+                    tracker_history.pop(tid, None)
+                    del _tid_last_seen[tid]
+                if stale_tids:
+                    logger.info(
+                        f"Evicted {len(stale_tids)} stale tracker IDs | "
+                        f"tracker_lock={len(tracker_class_lock)} "
+                        f"last_seen={len(_tid_last_seen)}"
+                    )
+
+            rejection_stats = {
+                "multi_frame_pending": set(),
+                "spatial_duplicate": 0,
+                "roi_outside": 0,
+                "class_mismatch": 0,
+                "prompt_filtered": 0,
+                "conf_filtered": 0,
+                "pothole_filtered": 0,
+                "vl_mismatch": 0,
+                "vl_errors": 0,
+            }
 
             # NDJSON streaming to temp file (memory efficient)
             _ndjson_fd = tempfile.NamedTemporaryFile(
@@ -196,81 +281,159 @@ class YoloeDetector(BaseDetector):
 
                 frame_count += 1
 
+                # Frame skipping — same as YoloDetector
+                if FRAME_SKIP > 1 and frame_count % FRAME_SKIP != 0:
+                    continue
+
                 current_time = frame_count / fps
 
-                # ── YOLOE inference via helper ───────────────────────────────
+                # ── YOLOE inference with BoTSORT tracking ─────────────────────
                 _t0_inf = time.perf_counter()
-                detections = process_frame_with_yoloe(self.model, frame)
+                results = self.model.track(
+                    frame,
+                    persist=True,
+                    conf=YOLOE_CONF_THRESHOLD,
+                    tracker=TRACKER,
+                    verbose=False,
+                    device=self.device,
+                    imgsz=YOLOE_IMGSZ,
+                    half=USE_HALF,
+                )
                 _inf_elapsed = time.perf_counter() - _t0_inf
                 perf_timings["yoloe_inference"]["total"] += _inf_elapsed
                 perf_timings["yoloe_inference"]["count"] += 1
 
                 frame_data = {"frame_id": frame_count, "detections": []}
 
-                for det in detections:
-                    class_name = det["class_name"]
-                    cx, cy = det["center"]
-                    x1, y1, x2, y2 = det["bbox"]
-                    conf = det["confidence"]
+                if results[0].boxes.id is not None:
+                    track_ids = results[0].boxes.id.cpu().numpy().astype(int)
+                    class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
+                    boxes = results[0].boxes.xyxy.cpu().numpy()
+                    confidences = results[0].boxes.conf.cpu().numpy()
+                    names = results[0].names
 
-                    # ── Spatial Deduplication ────────────────────────────────
-                    is_dup = self.is_duplicate_location(
-                        cx,
-                        cy,
-                        class_name,
-                        current_time,
-                        spatial_locations,
-                        TIME_THRESHOLD,
-                        MIN_DISTANCE_THRESHOLD,
-                    )
-                    if is_dup:
-                        continue
+                    for tid, cls_id, box, conf in zip(
+                        track_ids, class_ids, boxes, confidences
+                    ):
+                        tid, cls_id = int(tid), int(cls_id)
+                        x1, y1, x2, y2 = map(int, box)
+                        cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-                    # ── Record new detection ────────────────────────────────
-                    det_id = next_det_id
-                    next_det_id += 1
+                        # Skip anything outside our target classes
+                        if cls_id >= NUM_TARGET_CLASSES:
+                            continue
 
-                    # Store for spatial dedup in future frames
-                    spatial_locations.append(
-                        {
-                            "center": (cx, cy),
-                            "time": current_time,
-                            "class": class_name,
-                        }
-                    )
+                        prompt_name = names.get(cls_id, f"class_{cls_id}")
 
-                    confirmed[det_id] = {
-                        "detection_id": det_id,
-                        "type": class_name,
-                        "prompt_name": det["prompt_name"],
-                        "first_detected_frame": frame_count,
-                        "first_detected_time": round(current_time, 2),
-                        "confidence": conf,
-                        "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                        "vl_verified": None,
-                        "vl_confidence": None,
-                        "vl_category": None,
-                    }
-                    if class_name in counted_ids:
-                        counted_ids[class_name].add(det_id)
+                        # ── YOLOE Filter 1: Map prompt → backend class ────────
+                        backend_class = get_display_label(prompt_name)
+                        if backend_class is None:
+                            rejection_stats["prompt_filtered"] += 1
+                            continue
 
-                    total_detections_count += 1
-                    frame_data["detections"].append(
-                        {
-                            "frame_id": frame_count,
-                            "detection_id": det_id,
-                            "type": class_name,
-                            "prompt_name": det["prompt_name"],
-                            "confidence": conf,
-                            "count": {
-                                cls: len(counted_ids[cls])
-                                for cls in ALL_CLASSES
-                            },
-                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                            "center": {"x": cx, "y": cy},
-                            "area": (x2 - x1) * (y2 - y1),
-                        }
-                    )
+                        # ── YOLOE Filter 2: Per-category confidence ───────────
+                        min_conf = get_conf_threshold(prompt_name)
+                        if conf < min_conf:
+                            rejection_stats["conf_filtered"] += 1
+                            continue
+
+                        # ── YOLOE Filter 3: Pothole post-detection filters ────
+                        if backend_class == "pothole":
+                            skip, reason = _run_pothole_filters(
+                                frame, x1, y1, x2, y2
+                            )
+                            if skip:
+                                rejection_stats["pothole_filtered"] += 1
+                                continue
+
+                        # ── ROI filter (same as YoloDetector) ─────────────────
+                        if not (
+                            ROI_LEFT < cx < ROI_RIGHT
+                            and ROI_TOP < cy < ROI_BOTTOM
+                        ):
+                            rejection_stats["roi_outside"] += 1
+                            continue
+
+                        # ── Tracker class lock (same as YoloDetector) ─────────
+                        if tid in tracker_class_lock:
+                            if tracker_class_lock[tid] != backend_class:
+                                rejection_stats["class_mismatch"] += 1
+                                continue
+                        else:
+                            tracker_class_lock[tid] = backend_class
+
+                        # ── Multi-frame confirmation (same as YoloDetector) ───
+                        tracker_history[tid].append(current_time)
+                        _tid_last_seen[tid] = current_time
+                        recent = [
+                            t
+                            for t in tracker_history[tid]
+                            if current_time - t <= DETECTION_TIME_WINDOW
+                        ]
+                        min_needed = (
+                            1
+                            if conf >= HIGH_CONFIDENCE_THRESHOLD
+                            else LOW_CONFIDENCE_MIN_FRAMES
+                        )
+
+                        if (
+                            len(recent) >= min_needed
+                            and tid not in confirmed
+                        ):
+                            # ── Spatial deduplication ─────────────────────────
+                            is_dup, _ = self.is_duplicate_location(
+                                cx,
+                                cy,
+                                backend_class,
+                                current_time,
+                                spatial_locations,
+                                TIME_THRESHOLD,
+                                MIN_DISTANCE_THRESHOLD,
+                            )
+                            if not is_dup:
+                                _confirm_detection(
+                                    tid,
+                                    backend_class,
+                                    frame_count,
+                                    current_time,
+                                    conf,
+                                    x1, y1, x2, y2,
+                                    cx, cy,
+                                )
+                            else:
+                                rejection_stats["spatial_duplicate"] += 1
+                        elif tid not in confirmed:
+                            rejection_stats["multi_frame_pending"].add(tid)
+
+                        # ── Append to frame data if confirmed ─────────────────
+                        if tid in confirmed:
+                            total_detections_count += 1
+                            frame_data["detections"].append(
+                                {
+                                    "frame_id": frame_count,
+                                    "detection_id": tid,
+                                    "type": backend_class,
+                                    "prompt_name": prompt_name,
+                                    "confidence": round(float(conf), 3),
+                                    "count": {
+                                        "defected_sign_board": len(
+                                            counted_ids.get("defected_sign_board", set())
+                                        ),
+                                        "pothole": len(
+                                            counted_ids.get("pothole", set())
+                                        ),
+                                        "road_crack": 0,
+                                        "damaged_road_marking": 0,
+                                        "good_sign_board": 0,
+                                    },
+                                    "bbox": {
+                                        "x1": x1, "y1": y1,
+                                        "x2": x2, "y2": y2,
+                                    },
+                                    "center": {"x": cx, "y": cy},
+                                    "area": (x2 - x1) * (y2 - y1),
+                                }
+                            )
 
                 if frame_data["detections"]:
                     _ndjson_fd.write(json.dumps(frame_data) + "\n")
@@ -284,19 +447,15 @@ class YoloeDetector(BaseDetector):
                         progress,
                         loop,
                         {
-                            "unique_pothole": len(counted_ids.get("pothole", set())),
+                            "unique_pothole": len(
+                                counted_ids.get("pothole", set())
+                            ),
                             "unique_defected_sign_board": len(
                                 counted_ids.get("defected_sign_board", set())
                             ),
-                            "unique_road_crack": len(
-                                counted_ids.get("road_crack", set())
-                            ),
-                            "unique_damaged_road_marking": len(
-                                counted_ids.get("damaged_road_marking", set())
-                            ),
-                            "unique_good_sign_board": len(
-                                counted_ids.get("good_sign_board", set())
-                            ),
+                            "unique_road_crack": 0,
+                            "unique_damaged_road_marking": 0,
+                            "unique_good_sign_board": 0,
                             "total_road_damage": sum(
                                 len(counted_ids.get(c, set()))
                                 for c in ROAD_DAMAGE_CLASSES
@@ -305,24 +464,17 @@ class YoloeDetector(BaseDetector):
                         },
                     )
                     last_progress = progress
+                    # Periodically evict stale tracker entries
+                    _evict_stale_trackers()
 
             process_end = time.time()
 
-            # ── Build final results ──────────────────────────────────────────
+            # ── Build final results (same structure as YoloDetector) ──────────
             defected_sign_board_list = self._get_class_list(
                 confirmed, "defected_sign_board", gps_points, perf_timings
             )
             pothole_list = self._get_class_list(
                 confirmed, "pothole", gps_points, perf_timings
-            )
-            road_crack_list = self._get_class_list(
-                confirmed, "road_crack", gps_points, perf_timings
-            )
-            damaged_road_marking_list = self._get_class_list(
-                confirmed, "damaged_road_marking", gps_points, perf_timings
-            )
-            good_sign_board_list = self._get_class_list(
-                confirmed, "good_sign_board", gps_points, perf_timings
             )
 
             frames_with_detections = _frames_written
@@ -353,37 +505,41 @@ class YoloeDetector(BaseDetector):
                 "summary": {
                     "total_frames": frame_count,
                     "unique_defected_sign_board": len(
-                        counted_ids["defected_sign_board"]
+                        counted_ids.get("defected_sign_board", set())
                     ),
-                    "unique_pothole": len(counted_ids["pothole"]),
-                    "unique_road_crack": len(counted_ids["road_crack"]),
-                    "unique_damaged_road_marking": len(
-                        counted_ids["damaged_road_marking"]
+                    "unique_pothole": len(
+                        counted_ids.get("pothole", set())
                     ),
-                    "unique_good_sign_board": len(
-                        counted_ids["good_sign_board"]
-                    ),
+                    "unique_road_crack": 0,
+                    "unique_damaged_road_marking": 0,
+                    "unique_good_sign_board": 0,
                     "total_road_damage": sum(
-                        len(counted_ids[c]) for c in ROAD_DAMAGE_CLASSES
+                        len(counted_ids.get(c, set()))
+                        for c in ROAD_DAMAGE_CLASSES
                     ),
                     "total_detections": total_detections_count,
                     "frames_with_detections": frames_with_detections,
                     "detection_rate": detection_rate,
                 },
                 "rejection_stats": {
-                    "multi_frame_pending": 0,
-                    "spatial_duplicate": 0,
-                    "class_mismatch": 0,
-                    "roi_outside": 0,
+                    "multi_frame_pending": len(
+                        rejection_stats["multi_frame_pending"]
+                    ),
+                    "spatial_duplicate": rejection_stats["spatial_duplicate"],
+                    "class_mismatch": rejection_stats["class_mismatch"],
+                    "roi_outside": rejection_stats["roi_outside"],
+                    "prompt_filtered": rejection_stats["prompt_filtered"],
+                    "conf_filtered": rejection_stats["conf_filtered"],
+                    "pothole_filtered": rejection_stats["pothole_filtered"],
                     "vl_mismatch": 0,
                     "vl_errors": 0,
                 },
                 "vl_stats": None,
                 "defected_sign_board_list": defected_sign_board_list,
                 "pothole_list": pothole_list,
-                "road_crack_list": road_crack_list,
-                "damaged_road_marking_list": damaged_road_marking_list,
-                "good_sign_board_list": good_sign_board_list,
+                "road_crack_list": [],
+                "damaged_road_marking_list": [],
+                "good_sign_board_list": [],
                 "frames": frames,
             }
 
@@ -393,17 +549,15 @@ class YoloeDetector(BaseDetector):
 
             # Save to DB
             all_detections_flat = (
-                defected_sign_board_list
-                + pothole_list
-                + road_crack_list
-                + damaged_road_marking_list
-                + good_sign_board_list
+                defected_sign_board_list + pothole_list
             )
             self._save_to_db(video_id, all_detections_flat, perf_timings)
 
             # ── Perf report ──────────────────────────────────────────────────
             total_time = process_end - process_start
-            frames_processed = frame_count
+            frames_processed = (
+                frame_count // FRAME_SKIP if FRAME_SKIP > 1 else frame_count
+            )
 
             def _fmt(stage_key):
                 d = perf_timings[stage_key]
@@ -418,21 +572,24 @@ class YoloeDetector(BaseDetector):
             dg_t, dg_c, dg_avg = _fmt("db_gps_match")
             db_t, db_c, db_avg = _fmt("db_bulk_write")
 
+            def _flag(t):
+                return " ⚠️" if total_time > 0 and (t / total_time) > 0.20 else ""
+
             report_lines = [
                 f"{'=' * 78}",
                 f"  PERF REPORT — [{video_id}]  mode=yoloe",
                 f"{'=' * 78}",
                 f"  {'Stage':<30} {'Total (s)':>10} {'Count':>7} {'Avg/call (ms)':>15}",
                 f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
-                f"  {'Frame decode (I/O)':<30} {fd_t:>10.3f} {fd_c:>7d} {fd_avg:>15.2f}",
-                f"  {'YOLOE inference':<30} {yi_t:>10.3f} {yi_c:>7d} {yi_avg:>15.2f}",
-                f"  {'GPS coord lookup':<30} {gc_t:>10.3f} {gc_c:>7d} {gc_avg:>15.2f}",
-                f"  {'DB GPS matching':<30} {dg_t:>10.3f} {dg_c:>7d} {dg_avg:>15.2f}",
-                f"  {'DB bulk write':<30} {db_t:>10.3f} {db_c:>7d} {db_avg:>15.2f}",
+                f"  {'Frame decode (I/O)':<30} {fd_t:>10.3f} {fd_c:>7d} {fd_avg:>15.2f}{_flag(fd_t)}",
+                f"  {'YOLOE inference+track':<30} {yi_t:>10.3f} {yi_c:>7d} {yi_avg:>15.2f}{_flag(yi_t)}",
+                f"  {'GPS coord lookup':<30} {gc_t:>10.3f} {gc_c:>7d} {gc_avg:>15.2f}{_flag(gc_t)}",
+                f"  {'DB GPS matching':<30} {dg_t:>10.3f} {dg_c:>7d} {dg_avg:>15.2f}{_flag(dg_t)}",
+                f"  {'DB bulk write':<30} {db_t:>10.3f} {db_c:>7d} {db_avg:>15.2f}{_flag(db_t)}",
                 f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
                 f"  {'TOTAL pipeline time':<30} {total_time:>10.3f}s",
                 f"  {'Video duration':<30} {video_duration:>10.1f}s  ({total_frames} frames @ {fps:.0f} FPS)",
-                f"  {'Frames processed':<30} {frames_processed:>10d}  (every frame)",
+                f"  {'Frames processed':<30} {frames_processed:>10d}  (FRAME_SKIP={FRAME_SKIP})",
                 f"  {'Detections saved':<30} {len(all_detections_flat):>10d}",
                 f"{'=' * 78}",
             ]
@@ -452,6 +609,7 @@ class YoloeDetector(BaseDetector):
                         "type": "complete",
                         "status": "completed",
                         "summary": results["summary"],
+                        "rejection_stats": results["rejection_stats"],
                     },
                 ),
                 loop,
@@ -485,23 +643,6 @@ class YoloeDetector(BaseDetector):
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # ── Shared helpers (same contract as YoloDetector) ───────────────────────
-
-    def _load_gps_data(self, json_path):
-        """Load GPS data from JSON file."""
-        from pathlib import Path
-
-        gps_points = []
-        if json_path and Path(json_path).exists():
-            try:
-                with open(json_path, "r") as f:
-                    gps_data = json.load(f)
-                    gps_points = gps_data.get("gpsPoints", [])
-                    logger.info(
-                        f"Loaded {len(gps_points)} GPS points from {json_path}"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to load GPS data: {e}")
-        return gps_points
 
     @staticmethod
     def _read_ndjson_frames(
@@ -569,6 +710,11 @@ class YoloeDetector(BaseDetector):
                     if perf_timings is not None:
                         perf_timings["db_gps_match"]["total"] += _gps_db_elapsed
                         perf_timings["db_gps_match"]["count"] += 1
+                    perf_logger.info(
+                        f"[{video_id}] DB GPS match | {_gps_db_elapsed:.4f}s"
+                        f" | lat={lat:.5f} lng={lng:.5f}"
+                        f" | {'HIT' if location else 'MISS'}"
+                    )
                     if location:
                         location_id = location.id
                         package_id = location.package_id
@@ -598,6 +744,10 @@ class YoloeDetector(BaseDetector):
                 if perf_timings is not None:
                     perf_timings["db_bulk_write"]["total"] += _bulk_elapsed
                     perf_timings["db_bulk_write"]["count"] += 1
+                perf_logger.info(
+                    f"[{video_id}] DB bulk write | {_bulk_elapsed:.4f}s"
+                    f" | {len(db_detections)} rows"
+                )
                 logger.info(
                     f"Saved {len(db_detections)} detections to DB for {video_id}"
                 )
@@ -605,28 +755,3 @@ class YoloeDetector(BaseDetector):
             logger.error(f"Database save error: {e}")
         finally:
             db.close()
-
-    @staticmethod
-    def find_nearest_gps(detection_time: float, gps_points: list) -> dict:
-        """Find nearest GPS point to a given detection time."""
-        if not gps_points:
-            return {"lat": None, "lng": None}
-        nearest_point = min(
-            gps_points,
-            key=lambda p: abs(p.get("timestamp", 0) - detection_time),
-        )
-        return {
-            "lat": nearest_point.get("lat"),
-            "lng": nearest_point.get("lng"),
-        }
-
-    def _send_progress(self, video_id, progress, loop, extra_data=None):
-        """Send progress update via WebSocket."""
-        processing_status[video_id]["progress"] = progress
-        message = {"type": "progress", "progress": progress}
-        if extra_data:
-            message.update(extra_data)
-        asyncio.run_coroutine_threadsafe(
-            manager.send_message(video_id, message),
-            loop,
-        )

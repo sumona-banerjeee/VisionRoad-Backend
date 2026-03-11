@@ -2,10 +2,12 @@
 YOLOE Helper — Open-vocabulary detection with text prompts.
 
 Encapsulates all YOLOE-specific logic:
-  • 40 text prompts across 7 categories
-  • Defective class filtering (29 defective indices)
+  • 49 text prompts across sign + pothole categories
+  • Dual confidence thresholds (signboard=0.65, pothole=0.10)
+  • 5 post-detection filters for pothole FP removal
+  • Display label mapping (Defective Signboard / Pothole)
   • YOLOE model loading (lazy singleton)
-  • Per-frame inference + class name mapping to backend standard names
+  • Per-frame inference with full filter pipeline
 
 Called by YoloeDetector — this helper owns the model, prompts, and inference;
 the detector owns the video loop, progress, GPS, DB etc.
@@ -13,7 +15,7 @@ the detector owns the video loop, progress, GPS, DB etc.
 Return contract for process_frame_with_yoloe():
     [
         {
-            "class_name":  str,    # standard backend name (e.g. "defected_sign_board")
+            "class_name":  str,    # backend name ("defected_sign_board" / "pothole")
             "prompt_name": str,    # original YOLOE prompt
             "confidence":  float,
             "bbox":        tuple,  # (x1, y1, x2, y2)
@@ -27,6 +29,7 @@ import logging
 import threading
 import time
 
+import cv2
 import numpy as np
 import torch
 from ultralytics import YOLOE
@@ -35,7 +38,10 @@ logger = logging.getLogger(__name__)
 
 # ── YOLOE Configuration ──────────────────────────────────────────────────────
 YOLOE_MODEL_WEIGHTS = "yoloe-11m-seg.pt"
-YOLOE_CONF_THRESHOLD = 0.65
+YOLOE_CONF_SIGNBOARD = 0.65   # confidence threshold for signboard detections
+YOLOE_CONF_POTHOLE = 0.10     # confidence threshold for pothole detections
+# Minimum conf used for model.predict() — post-filtering applies per-category
+YOLOE_CONF_THRESHOLD = YOLOE_CONF_POTHOLE
 
 # ── Open-vocabulary text prompts ──────────────────────────────────────────────
 TARGET_PROMPTS = [
@@ -43,9 +49,9 @@ TARGET_PROMPTS = [
     "clean traffic sign on pole",
     "intact road sign on metal post",
     "visible traffic signboard on road",
-    "good condition municipal road sign",          # Indian municipal context
+    "good condition municipal road sign",
 
-    # ── Triangular Warning Signs ──  ← NEW CATEGORY
+    # ── Triangular Warning Signs ──
     "triangular warning traffic sign",
     "faded triangular road sign red border",
     "damaged triangle traffic sign on pole",
@@ -53,16 +59,16 @@ TARGET_PROMPTS = [
 
     # ── Circular / Round Signs ──
     "circular traffic sign on road",
-    "blank white circular traffic sign",           # covers Image 3
-    "faded erased circular road sign",             # covers Image 3 specifically
-    "shattered broken circular road sign",         # covers Image 2
-    "damaged convex road mirror sign",             # covers Image 2 specifically
+    "blank white circular traffic sign",
+    "faded erased circular road sign",
+    "shattered broken circular road sign",
+    "damaged convex road mirror sign",
     "round prohibitory traffic sign",
-    "circular no parking sign",                    # covers Image 6 background
+    "circular no parking sign",
 
-    # ── Rectangular / Informational Signs ──      ← NEW CATEGORY
+    # ── Rectangular / Informational Signs ──
     "rectangular road information sign",
-    "faded bus stop signboard",                    # covers Image 6
+    "faded bus stop signboard",
     "faded rectangular traffic sign pole",
     "blank white rectangular road sign",
 
@@ -75,166 +81,228 @@ TARGET_PROMPTS = [
     "bent traffic sign pole",
     "graffiti covered traffic sign",
     "cracked traffic signboard",
-    "weathered signboard with peeling paint",      # NEW — covers Images 1, 5
+    "weathered signboard with peeling paint",
 
     # ── Commercial / Non-traffic Signboards ──
     "roadside advertisement billboard",
     "shop signboard near road",
     "commercial banner on roadside",
 
-    # ── Road Defects ──
-    "pothole on asphalt road",
-    "deep road pothole",
-    "disintegrating road surface patch",           # NEW — covers Image 4
-    "loose gravel patch on road",                  # NEW — covers Image 4
-    "water puddle on asphalt road",
-    "standing water on road surface",
-    "longitudinal crack on asphalt",
-    "road surface crack",
-    "faded road lane marking",
-    "worn lane line on road",
+    # ── Core potholes ──
+    "pothole on road",
+    "deep pothole on asphalt",
+    "shallow pothole on road",
+    "small pothole on asphalt",
+    "pothole with rough sandy interior",
+
+    # ── Exposed sublayer (white/sandy texture) ──
+    "exposed aggregate patch on road",
+    "white sandy rough patch on road surface",
+    "rough granular white patch on asphalt",
+    "crumbling asphalt with exposed aggregate",
+
+    # ── Surface raveling (grey granular texture) ──
+    "grey rough granular patch on asphalt",
+    "surface raveling on road",
+    "loose aggregate patch on asphalt",
+    "coarse granular patch on road surface",
+    "rough irregular worn patch on road",
+
+    # ── Developing / edges ──
+    "pothole with broken crumbling edges",
+    "developing pothole forming in asphalt",
+
+    # ── Multiple / severe ──
+    "multiple potholes on road surface",
+    "pothole with rough sandy interior texture",
 ]
 
 PROMPTS = TARGET_PROMPTS
 NUM_TARGET_CLASSES = len(TARGET_PROMPTS)
 
-# ── Display filter — only these indices are treated as defects ────────────────
-DEFECTIVE_CLASS_INDICES = {
+# ── Only these pothole prompts are accepted (all others silently dropped) ─────
+ACCEPTED_POTHOLE_PROMPTS = {
+    "pothole with rough sandy interior",
+    "pothole with rough sandy interior texture",
+}
+
+# ── Good sign prompts (skipped entirely) ──────────────────────────────────────
+_GOOD_SIGN_PROMPTS = {
+    "clean traffic sign on pole",
+    "intact road sign on metal post",
+    "visible traffic signboard on road",
+    "good condition municipal road sign",
+}
+
+# ── All other sign prompts → "defected_sign_board" ───────────────────────────
+_DEFECTIVE_SIGN_PROMPTS = {
     # Triangular
-    TARGET_PROMPTS.index("faded triangular road sign red border"),
-    TARGET_PROMPTS.index("damaged triangle traffic sign on pole"),
-    TARGET_PROMPTS.index("weathered triangular signboard"),
+    "triangular warning traffic sign",
+    "faded triangular road sign red border",
+    "damaged triangle traffic sign on pole",
+    "weathered triangular signboard",
     # Circular
-    TARGET_PROMPTS.index("blank white circular traffic sign"),
-    TARGET_PROMPTS.index("faded erased circular road sign"),
-    TARGET_PROMPTS.index("shattered broken circular road sign"),
-    TARGET_PROMPTS.index("damaged convex road mirror sign"),
+    "circular traffic sign on road",
+    "blank white circular traffic sign",
+    "faded erased circular road sign",
+    "shattered broken circular road sign",
+    "damaged convex road mirror sign",
+    "round prohibitory traffic sign",
+    "circular no parking sign",
     # Rectangular
-    TARGET_PROMPTS.index("faded bus stop signboard"),
-    TARGET_PROMPTS.index("faded rectangular traffic sign pole"),
-    TARGET_PROMPTS.index("blank white rectangular road sign"),
+    "rectangular road information sign",
+    "faded bus stop signboard",
+    "faded rectangular traffic sign pole",
+    "blank white rectangular road sign",
     # Damaged General
-    TARGET_PROMPTS.index("damaged traffic signboard on road"),
-    TARGET_PROMPTS.index("broken traffic signboard on pole"),
-    TARGET_PROMPTS.index("faded traffic signboard on road"),
-    TARGET_PROMPTS.index("blank white faded signboard"),
-    TARGET_PROMPTS.index("rusted metal traffic sign"),
-    TARGET_PROMPTS.index("bent traffic sign pole"),
-    TARGET_PROMPTS.index("graffiti covered traffic sign"),
-    TARGET_PROMPTS.index("cracked traffic signboard"),
-    TARGET_PROMPTS.index("weathered signboard with peeling paint"),
-    # Potholes
-    TARGET_PROMPTS.index("tiny circular pothole on road"),
-    TARGET_PROMPTS.index("small shallow road pothole"),
-    TARGET_PROMPTS.index("large deep crater-like pothole"),
-    TARGET_PROMPTS.index("cluster of multiple small potholes"),
-    TARGET_PROMPTS.index("rough potholed road surface"),
-    TARGET_PROMPTS.index("developing pothole with loose asphalt"),
-    TARGET_PROMPTS.index("deep road pothole"),
-    # Surface Raveling
-    TARGET_PROMPTS.index("shallow patch of missing asphalt"),
-    TARGET_PROMPTS.index("exposed aggregate road surface"),
-    TARGET_PROMPTS.index("surface raveling on asphalt"),
-    TARGET_PROMPTS.index("broad irregular worn road patch"),
-    TARGET_PROMPTS.index("disintegrated asphalt surface area"),
-    TARGET_PROMPTS.index("exposed light colored road sublayer"),
-    # Other Defects
-    TARGET_PROMPTS.index("alligator cracking pattern on asphalt"),
-    TARGET_PROMPTS.index("longitudinal road surface crack"),
-    TARGET_PROMPTS.index("transverse crack across road"),
-    TARGET_PROMPTS.index("damaged road divider or median"),
-    TARGET_PROMPTS.index("missing circular manhole cover"),
-    TARGET_PROMPTS.index("uneven road surface bump"),
-    TARGET_PROMPTS.index("road shoulder erosion or drop-off"),
-    TARGET_PROMPTS.index("construction debris on road lane"),
-    TARGET_PROMPTS.index("loose gravel spill on road"),
-    TARGET_PROMPTS.index("water puddle on asphalt road"),
-    TARGET_PROMPTS.index("standing water on road surface"),
-    TARGET_PROMPTS.index("faded road lane marking"),
-    TARGET_PROMPTS.index("worn lane line on road"),
+    "damaged traffic signboard on road",
+    "broken traffic signboard on pole",
+    "faded traffic signboard on road",
+    "blank white faded signboard",
+    "rusted metal traffic sign",
+    "bent traffic sign pole",
+    "graffiti covered traffic sign",
+    "cracked traffic signboard",
+    "weathered signboard with peeling paint",
+    # Commercial
+    "roadside advertisement billboard",
+    "shop signboard near road",
+    "commercial banner on roadside",
 }
 
-# ── Prompt → Backend standard class name mapping ─────────────────────────────
-_PROMPT_TO_BACKEND_CLASS = {
-    # Good signboards
-    "clean traffic sign on pole": "good_sign_board",
-    "intact road sign on metal post": "good_sign_board",
-    "visible traffic signboard on road": "good_sign_board",
-    "good condition municipal road sign": "good_sign_board",
-    "triangular warning traffic sign": "good_sign_board",
-    "circular traffic sign on road": "good_sign_board",
-    "round prohibitory traffic sign": "good_sign_board",
-    "circular no parking sign": "good_sign_board",
-    "rectangular road information sign": "good_sign_board",
-    "roadside advertisement billboard": "good_sign_board",
-    "shop signboard near road": "good_sign_board",
-    "commercial banner on roadside": "good_sign_board",
 
-    # Defect Signboards
-    "faded triangular road sign red border": "defected_sign_board",
-    "damaged triangle traffic sign on pole": "defected_sign_board",
-    "weathered triangular signboard": "defected_sign_board",
-    "blank white circular traffic sign": "defected_sign_board",
-    "faded erased circular road sign": "defected_sign_board",
-    "shattered broken circular road sign": "defected_sign_board",
-    "damaged convex road mirror sign": "defected_sign_board",
-    "faded bus stop signboard": "defected_sign_board",
-    "faded rectangular traffic sign pole": "defected_sign_board",
-    "blank white rectangular road sign": "defected_sign_board",
-    "damaged traffic signboard on road": "defected_sign_board",
-    "broken traffic signboard on pole": "defected_sign_board",
-    "faded traffic signboard on road": "defected_sign_board",
-    "blank white faded signboard": "defected_sign_board",
-    "rusted metal traffic sign": "defected_sign_board",
-    "bent traffic sign pole": "defected_sign_board",
-    "graffiti covered traffic sign": "defected_sign_board",
-    "cracked traffic signboard": "defected_sign_board",
-    "weathered signboard with peeling paint": "defected_sign_board",
+def get_display_label(prompt_name: str) -> str | None:
+    """Map raw prompt to backend class name. Returns None to skip."""
+    if prompt_name in _DEFECTIVE_SIGN_PROMPTS:
+        return "defected_sign_board"
+    if prompt_name in ACCEPTED_POTHOLE_PROMPTS:
+        return "pothole"
+    return None  # skip good signs and non-accepted pothole prompts
 
-    # Potholes & Surface Issues
-    "tiny circular pothole on road": "pothole",
-    "small shallow road pothole": "pothole",
-    "large deep crater-like pothole": "pothole",
-    "cluster of multiple small potholes": "pothole",
-    "rough potholed road surface": "pothole",
-    "developing pothole with loose asphalt": "pothole",
-    "deep road pothole": "pothole",
-    "shallow patch of missing asphalt": "pothole",
-    "exposed aggregate road surface": "pothole",
-    "surface raveling on asphalt": "pothole",
-    "broad irregular worn road patch": "pothole",
-    "disintegrated asphalt surface area": "pothole",
-    "exposed light colored road sublayer": "pothole",
-    "damaged road divider or median": "pothole",
-    "missing circular manhole cover": "pothole",
-    "uneven road surface bump": "pothole",
-    "road shoulder erosion or drop-off": "pothole",
-    "construction debris on road lane": "pothole",
-    "loose gravel spill on road": "pothole",
-    "water puddle on asphalt road": "pothole",
-    "standing water on road surface": "pothole",
 
-    # Cracks
-    "alligator cracking pattern on asphalt": "road_crack",
-    "longitudinal road surface crack": "road_crack",
-    "transverse crack across road": "road_crack",
-    "road surface crack": "road_crack",
-    "longitudinal crack on asphalt": "road_crack",
+def get_conf_threshold(prompt_name: str) -> float:
+    """Return the correct confidence threshold for this prompt."""
+    if prompt_name in _DEFECTIVE_SIGN_PROMPTS:
+        return YOLOE_CONF_SIGNBOARD
+    return YOLOE_CONF_POTHOLE
 
-    # Markings
-    "faded road lane marking": "damaged_road_marking",
-    "worn lane line on road": "damaged_road_marking",
-}
 
 # Backend road-damage classes (same as YoloDetector)
 ROAD_DAMAGE_CLASSES = {
     "defected_sign_board",
     "pothole",
-    "road_crack",
-    "damaged_road_marking",
 }
-EXCLUDED_CLASSES = {"good_sign_board"}
-ALL_CLASSES = ROAD_DAMAGE_CLASSES | EXCLUDED_CLASSES
+ALL_CLASSES = ROAD_DAMAGE_CLASSES
+
+
+# ══════════════════════════════════════════════
+# POST-DETECTION FILTERS (pothole only)
+# ══════════════════════════════════════════════
+
+def _get_roi(frame, x1, y1, x2, y2):
+    """Safely clip ROI to frame bounds."""
+    h, w = frame.shape[:2]
+    x1c, y1c = max(0, x1), max(0, y1)
+    x2c, y2c = min(w, x2), min(h, y2)
+    return frame[y1c:y2c, x1c:x2c]
+
+
+def _filter_shadow(roi) -> tuple[bool, str]:
+    """
+    FILTER 1 — Shadow
+    Shadow = dark (mean < 80) AND smooth (std < 18).
+    Real pothole = rough texture → high std even if dark.
+    """
+    if roi.size == 0:
+        return True, "empty ROI"
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    mean_val = float(gray.mean())
+    std_val = float(gray.std())
+    if mean_val < 80 and std_val < 18:
+        return True, f"shadow [mean={mean_val:.1f}, std={std_val:.1f}]"
+    return False, ""
+
+
+def _filter_size(x1, y1, x2, y2, frame_w, frame_h) -> tuple[bool, str]:
+    """
+    FILTER 2 — Size
+    Too small  (< 0.3% of frame) → noise/dust spec.
+    Too large  (> 60% of frame)  → whole-frame false match.
+    """
+    box_area = (x2 - x1) * (y2 - y1)
+    frame_area = frame_w * frame_h
+    ratio = box_area / frame_area
+    if ratio < 0.003:
+        return True, f"too small [area={ratio:.4f}]"
+    if ratio > 0.60:
+        return True, f"too large [area={ratio:.2f}]"
+    return False, ""
+
+
+def _filter_texture(roi) -> tuple[bool, str]:
+    """
+    FILTER 3 — Texture (Laplacian variance)
+    Real potholes/raveling = rough surface → high variance.
+    Shadows/paint/glare    = smooth        → low variance.
+    Threshold: variance < 12 → too smooth.
+    """
+    if roi.size == 0:
+        return True, "empty ROI"
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    variance = float(laplacian.var())
+    if variance < 12:
+        return True, f"too smooth [laplacian={variance:.1f}]"
+    return False, ""
+
+
+def _filter_aspect(x1, y1, x2, y2) -> tuple[bool, str]:
+    """
+    FILTER 4 — Aspect Ratio
+    Potholes are blob-shaped (ratio 0.2–5.0).
+    Very thin/long boxes = road markings, cracks, poles.
+    """
+    w = x2 - x1
+    h = y2 - y1
+    if h == 0:
+        return True, "zero height"
+    aspect = w / h
+    if aspect < 0.2 or aspect > 5.0:
+        return True, f"bad aspect [{aspect:.2f}]"
+    return False, ""
+
+
+def _filter_brightness(roi) -> tuple[bool, str]:
+    """
+    FILTER 5 — Brightness
+    Very bright + smooth = road paint / glare / white marking.
+    Bright (mean > 210) AND smooth (std < 15) → not a pothole.
+    """
+    if roi.size == 0:
+        return True, "empty ROI"
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    mean_val = float(gray.mean())
+    std_val = float(gray.std())
+    if mean_val > 210 and std_val < 15:
+        return True, f"bright uniform [mean={mean_val:.1f}, std={std_val:.1f}]"
+    return False, ""
+
+
+def _run_pothole_filters(frame, x1, y1, x2, y2) -> tuple[bool, str]:
+    """Run all 5 pothole post-detection filters. Returns (should_skip, reason)."""
+    h, w = frame.shape[:2]
+    roi = _get_roi(frame, x1, y1, x2, y2)
+    for fn in [
+        lambda: _filter_shadow(roi),
+        lambda: _filter_size(x1, y1, x2, y2, w, h),
+        lambda: _filter_texture(roi),
+        lambda: _filter_aspect(x1, y1, x2, y2),
+        lambda: _filter_brightness(roi),
+    ]:
+        failed, reason = fn()
+        if failed:
+            return True, reason
+    return False, ""
 
 
 # ── Lazy singleton for YOLOE model ───────────────────────────────────────────
@@ -272,9 +340,11 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
     """
     Run YOLOE inference on a single frame and return filtered detections.
 
-    Only detections whose class index is in DEFECTIVE_CLASS_INDICES are
-    returned.  Good signs, generic signs, and commercial boards are silently
-    filtered (but still sent to the model as prompts for better discrimination).
+    Pipeline per detection:
+      1. Skip if outside target class range
+      2. Map prompt → display label (skip good signs & non-accepted pothole)
+      3. Apply per-category confidence threshold (signboard=0.65, pothole=0.10)
+      4. For potholes only: run 5 post-detection filters (shadow/size/texture/aspect/brightness)
 
     Args:
         model: Loaded YOLOE model (from load_yoloe_model)
@@ -295,20 +365,33 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
         names = r.names  # dict {class_id: class_name}
 
         for box, conf, cls_id in zip(boxes, confs, class_ids):
-            # Filter 1: skip anything outside our target classes
+            # Filter 1: skip anything outside target classes
             if cls_id >= NUM_TARGET_CLASSES:
                 continue
 
-            # Filter 2: skip non-defective classes
-            if cls_id not in DEFECTIVE_CLASS_INDICES:
+            x1, y1, x2, y2 = map(int, box)
+            prompt_name = names.get(cls_id, f"class_{cls_id}")
+
+            # Filter 2: map to backend class (skip unwanted prompts)
+            backend_class = get_display_label(prompt_name)
+            if backend_class is None:
                 continue
 
-            x1, y1, x2, y2 = map(int, box)
+            # Filter 3: per-category confidence threshold
+            min_conf = get_conf_threshold(prompt_name)
+            if conf < min_conf:
+                continue
+
+            # Filter 4: post-detection filters (pothole only)
+            if backend_class == "pothole":
+                skip, reason = _run_pothole_filters(frame, x1, y1, x2, y2)
+                if skip:
+                    logger.debug(
+                        f"Pothole filtered: \"{prompt_name}\" conf={conf:.2f} → {reason}"
+                    )
+                    continue
+
             cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
-            prompt_name = names.get(cls_id, f"class_{cls_id}")
-            backend_class = _PROMPT_TO_BACKEND_CLASS.get(
-                prompt_name, "defected_sign_board"
-            )
 
             detections.append({
                 "class_name": backend_class,

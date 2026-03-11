@@ -25,60 +25,55 @@ MODEL_WEIGHTS = "yoloe-11m-seg.pt"
 # OUTPUT_PATH  = r"C:\Users\Administrator\Desktop\AiML\Sumona\VisionRoad-Backend\Test\output\sign_pothole_results.mp4"
 
 # ── Input / Output paths image──
-INPUT_SOURCE = r"Test\img\img4.png"
-OUTPUT_PATH  = r"Test\output\img\img4_output.png"
+INPUT_SOURCE = r"Test\img\img1.png"
+OUTPUT_PATH  = r"Test\output\img\output"
 
 # ── Open-vocabulary text prompts ──
 TARGET_PROMPTS = [
-    # ── Intact / Good Signboards ──
-    "clean traffic sign on pole",
-    "intact road sign on metal post",
-    "visible traffic signboard on road",
-    "good condition municipal road sign",
+    # # ── Intact / Good Signboards ──
+    # "clean traffic sign on pole",
+    # "intact road sign on metal post",
+    # "visible traffic signboard on road",
+    # "good condition municipal road sign",
 
-    # ── Triangular Warning Signs ──
-    "triangular warning traffic sign",
-    "faded triangular road sign red border",
-    "damaged triangle traffic sign on pole",
-    "weathered triangular signboard",
+    # # ── Triangular Warning Signs ──
+    # "triangular warning traffic sign",
+    # "faded triangular road sign red border",
+    # "damaged triangle traffic sign on pole",
+    # "weathered triangular signboard",
 
-    # ── Circular / Round Signs ──
-    "circular traffic sign on road",
-    "blank white circular traffic sign",
-    "faded erased circular road sign",
-    "shattered broken circular road sign",
-    "damaged convex road mirror sign",
-    "round prohibitory traffic sign",
-    "circular no parking sign",
+    # # ── Circular / Round Signs ──
+    # "circular traffic sign on road",
+    # "blank white circular traffic sign",
+    # "faded erased circular road sign",
+    # "shattered broken circular road sign",
+    # "damaged convex road mirror sign",
+    # "round prohibitory traffic sign",
+    # "circular no parking sign",
 
-    # ── Rectangular / Informational Signs ──
-    "rectangular road information sign",
-    "faded bus stop signboard",
-    "faded rectangular traffic sign pole",
-    "blank white rectangular road sign",
+    # # ── Rectangular / Informational Signs ──
+    # "rectangular road information sign",
+    # "faded bus stop signboard",
+    # "faded rectangular traffic sign pole",
+    # "blank white rectangular road sign",
 
-    # ── Damaged / Defective Signboards (General) ──
-    "damaged traffic signboard on road",
-    "broken traffic signboard on pole",
-    "faded traffic signboard on road",
-    "blank white faded signboard",
-    "rusted metal traffic sign",
-    "bent traffic sign pole",
-    "graffiti covered traffic sign",
-    "cracked traffic signboard",
-    "weathered signboard with peeling paint",
+    # # ── Damaged / Defective Signboards (General) ──
+    # "damaged traffic signboard on road",
+    # "broken traffic signboard on pole",
+    # "faded traffic signboard on road",
+    # "blank white faded signboard",
+    # "rusted metal traffic sign",
+    # "bent traffic sign pole",
+    # "graffiti covered traffic sign",
+    # "cracked traffic signboard",
+    # "weathered signboard with peeling paint",
 
-    # ── Commercial / Non-traffic Signboards ──
-    "roadside advertisement billboard",
-    "shop signboard near road",
-    "commercial banner on roadside",
+    # # ── Commercial / Non-traffic Signboards ──
+    # "roadside advertisement billboard",
+    # "shop signboard near road",
+    # "commercial banner on roadside",
 
     # ── Potholes (Detailed) ──
-    "pothole in middle of road",
-    "pothole",
-    "pothole in road",
-    "pothole in right side of road",
-    "pothole in left side of road",
     "tiny circular pothole on road",
     "small shallow road pothole",
     "large deep crater-like pothole",

@@ -49,9 +49,9 @@ TARGET_PROMPTS = [
     "clean traffic sign on pole",
     "intact road sign on metal post",
     "visible traffic signboard on road",
-    "good condition municipal road sign",
+    "good condition municipal road sign",          # Indian municipal context
 
-    # ── Triangular Warning Signs ──
+    # ── Triangular Warning Signs ──  ← NEW CATEGORY
     "triangular warning traffic sign",
     "faded triangular road sign red border",
     "damaged triangle traffic sign on pole",
@@ -59,16 +59,16 @@ TARGET_PROMPTS = [
 
     # ── Circular / Round Signs ──
     "circular traffic sign on road",
-    "blank white circular traffic sign",
-    "faded erased circular road sign",
-    "shattered broken circular road sign",
-    "damaged convex road mirror sign",
+    "blank white circular traffic sign",           # covers Image 3
+    "faded erased circular road sign",             # covers Image 3 specifically
+    "shattered broken circular road sign",         # covers Image 2
+    "damaged convex road mirror sign",             # covers Image 2 specifically
     "round prohibitory traffic sign",
-    "circular no parking sign",
+    "circular no parking sign",                    # covers Image 6 background
 
-    # ── Rectangular / Informational Signs ──
+    # ── Rectangular / Informational Signs ──      ← NEW CATEGORY
     "rectangular road information sign",
-    "faded bus stop signboard",
+    "faded bus stop signboard",                    # covers Image 6
     "faded rectangular traffic sign pole",
     "blank white rectangular road sign",
 
@@ -81,12 +81,16 @@ TARGET_PROMPTS = [
     "bent traffic sign pole",
     "graffiti covered traffic sign",
     "cracked traffic signboard",
-    "weathered signboard with peeling paint",
+    "weathered signboard with peeling paint",      # NEW — covers Images 1, 5
 
     # ── Commercial / Non-traffic Signboards ──
+    "advertisement billboard",
     "roadside advertisement billboard",
     "shop signboard near road",
     "commercial banner on roadside",
+    "large outdoor advertising billboard",
+    "commercial hoarding on metal frame",
+    "branded advertisement hoarding",
 
     # ── Core potholes ──
     "pothole on road",
@@ -132,6 +136,13 @@ _GOOD_SIGN_PROMPTS = {
     "intact road sign on metal post",
     "visible traffic signboard on road",
     "good condition municipal road sign",
+    "roadside advertisement billboard",
+    "shop signboard near road",
+    "rectangular road information sign",
+    "commercial banner on roadside",
+    "large outdoor advertising billboard",
+    "commercial hoarding on metal frame",
+    "branded advertisement hoarding",
 }
 
 # ── All other sign prompts → "defected_sign_board" ───────────────────────────
@@ -150,7 +161,6 @@ _DEFECTIVE_SIGN_PROMPTS = {
     "round prohibitory traffic sign",
     "circular no parking sign",
     # Rectangular
-    "rectangular road information sign",
     "faded bus stop signboard",
     "faded rectangular traffic sign pole",
     "blank white rectangular road sign",
@@ -164,10 +174,6 @@ _DEFECTIVE_SIGN_PROMPTS = {
     "graffiti covered traffic sign",
     "cracked traffic signboard",
     "weathered signboard with peeling paint",
-    # Commercial
-    "roadside advertisement billboard",
-    "shop signboard near road",
-    "commercial banner on roadside",
 }
 
 

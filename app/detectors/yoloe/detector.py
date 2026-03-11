@@ -58,6 +58,38 @@ class YoloeDetector(BaseDetector):
         self.detection_mode = "yoloe"
         logger.info("YoloeDetector created — model will be loaded on first use")
 
+    @staticmethod
+    def calculate_distance(p1, p2):
+        """Calculate Euclidean distance between two points."""
+        return ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
+
+    def is_duplicate_location(
+        self,
+        cx,
+        cy,
+        class_name,
+        current_time,
+        spatial_locations,
+        time_threshold,
+        min_distance_threshold,
+    ):
+        """Check if this location/class was already counted recently."""
+        for existing in spatial_locations:
+            prev_cx, prev_cy = existing["center"]
+            prev_class = existing["class"]
+            prev_time = existing["time"]
+
+            distance = self.calculate_distance((cx, cy), (prev_cx, prev_cy))
+            time_gap = current_time - prev_time
+
+            if (
+                prev_class == class_name
+                and distance < min_distance_threshold
+                and time_gap < time_threshold
+            ):
+                return True
+        return False
+
     def _load_model(self):
         """Load YOLOE model via helper (lazy singleton)."""
         self.model = load_yoloe_model()
@@ -129,9 +161,14 @@ class YoloeDetector(BaseDetector):
                 f"CONF={YOLOE_CONF_THRESHOLD}, dedup=OFF"
             )
 
-            # Tracking structures (no spatial dedup — every detection is kept)
+            # Adaptive parameters (dedup)
+            TIME_THRESHOLD = video_duration * 0.30
+            MIN_DISTANCE_THRESHOLD = 120
+
+            # Tracking structures
             confirmed = {}
             counted_ids = {cls: set() for cls in ALL_CLASSES}
+            spatial_locations = []
             next_det_id = 0  # Simple incrementing ID (no tracker IDs)
 
             # NDJSON streaming to temp file (memory efficient)
@@ -176,9 +213,31 @@ class YoloeDetector(BaseDetector):
                     x1, y1, x2, y2 = det["bbox"]
                     conf = det["confidence"]
 
-                    # ── Record every detection (no dedup) ─────────────────────
+                    # ── Spatial Deduplication ────────────────────────────────
+                    is_dup = self.is_duplicate_location(
+                        cx,
+                        cy,
+                        class_name,
+                        current_time,
+                        spatial_locations,
+                        TIME_THRESHOLD,
+                        MIN_DISTANCE_THRESHOLD,
+                    )
+                    if is_dup:
+                        continue
+
+                    # ── Record new detection ────────────────────────────────
                     det_id = next_det_id
                     next_det_id += 1
+
+                    # Store for spatial dedup in future frames
+                    spatial_locations.append(
+                        {
+                            "center": (cx, cy),
+                            "time": current_time,
+                            "class": class_name,
+                        }
+                    )
 
                     confirmed[det_id] = {
                         "detection_id": det_id,

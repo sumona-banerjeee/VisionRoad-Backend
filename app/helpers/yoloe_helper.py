@@ -43,9 +43,9 @@ TARGET_PROMPTS = [
     "clean traffic sign on pole",
     "intact road sign on metal post",
     "visible traffic signboard on road",
-    "good condition municipal road sign",
+    "good condition municipal road sign",          # Indian municipal context
 
-    # ── Triangular Warning Signs ──
+    # ── Triangular Warning Signs ──  ← NEW CATEGORY
     "triangular warning traffic sign",
     "faded triangular road sign red border",
     "damaged triangle traffic sign on pole",
@@ -53,16 +53,16 @@ TARGET_PROMPTS = [
 
     # ── Circular / Round Signs ──
     "circular traffic sign on road",
-    "blank white circular traffic sign",
-    "faded erased circular road sign",
-    "shattered broken circular road sign",
-    "damaged convex road mirror sign",
+    "blank white circular traffic sign",           # covers Image 3
+    "faded erased circular road sign",             # covers Image 3 specifically
+    "shattered broken circular road sign",         # covers Image 2
+    "damaged convex road mirror sign",             # covers Image 2 specifically
     "round prohibitory traffic sign",
-    "circular no parking sign",
+    "circular no parking sign",                    # covers Image 6 background
 
-    # ── Rectangular / Informational Signs ──
+    # ── Rectangular / Informational Signs ──      ← NEW CATEGORY
     "rectangular road information sign",
-    "faded bus stop signboard",
+    "faded bus stop signboard",                    # covers Image 6
     "faded rectangular traffic sign pole",
     "blank white rectangular road sign",
 
@@ -75,7 +75,7 @@ TARGET_PROMPTS = [
     "bent traffic sign pole",
     "graffiti covered traffic sign",
     "cracked traffic signboard",
-    "weathered signboard with peeling paint",
+    "weathered signboard with peeling paint",      # NEW — covers Images 1, 5
 
     # ── Commercial / Non-traffic Signboards ──
     "roadside advertisement billboard",
@@ -85,8 +85,8 @@ TARGET_PROMPTS = [
     # ── Road Defects ──
     "pothole on asphalt road",
     "deep road pothole",
-    "disintegrating road surface patch",
-    "loose gravel patch on road",
+    "disintegrating road surface patch",           # NEW — covers Image 4
+    "loose gravel patch on road",                  # NEW — covers Image 4
     "water puddle on asphalt road",
     "standing water on road surface",
     "longitudinal crack on asphalt",
@@ -100,16 +100,20 @@ NUM_TARGET_CLASSES = len(TARGET_PROMPTS)
 
 # ── Display filter — only these indices are treated as defects ────────────────
 DEFECTIVE_CLASS_INDICES = {
+    # Triangular
     TARGET_PROMPTS.index("faded triangular road sign red border"),
     TARGET_PROMPTS.index("damaged triangle traffic sign on pole"),
     TARGET_PROMPTS.index("weathered triangular signboard"),
+    # Circular
     TARGET_PROMPTS.index("blank white circular traffic sign"),
     TARGET_PROMPTS.index("faded erased circular road sign"),
     TARGET_PROMPTS.index("shattered broken circular road sign"),
     TARGET_PROMPTS.index("damaged convex road mirror sign"),
+    # Rectangular
     TARGET_PROMPTS.index("faded bus stop signboard"),
     TARGET_PROMPTS.index("faded rectangular traffic sign pole"),
     TARGET_PROMPTS.index("blank white rectangular road sign"),
+    # Damaged General
     TARGET_PROMPTS.index("damaged traffic signboard on road"),
     TARGET_PROMPTS.index("broken traffic signboard on pole"),
     TARGET_PROMPTS.index("faded traffic signboard on road"),
@@ -119,50 +123,64 @@ DEFECTIVE_CLASS_INDICES = {
     TARGET_PROMPTS.index("graffiti covered traffic sign"),
     TARGET_PROMPTS.index("cracked traffic signboard"),
     TARGET_PROMPTS.index("weathered signboard with peeling paint"),
-    TARGET_PROMPTS.index("pothole on asphalt road"),
+    # Potholes
+    TARGET_PROMPTS.index("tiny circular pothole on road"),
+    TARGET_PROMPTS.index("small shallow road pothole"),
+    TARGET_PROMPTS.index("large deep crater-like pothole"),
+    TARGET_PROMPTS.index("cluster of multiple small potholes"),
+    TARGET_PROMPTS.index("rough potholed road surface"),
+    TARGET_PROMPTS.index("developing pothole with loose asphalt"),
     TARGET_PROMPTS.index("deep road pothole"),
-    TARGET_PROMPTS.index("disintegrating road surface patch"),
-    TARGET_PROMPTS.index("loose gravel patch on road"),
+    # Surface Raveling
+    TARGET_PROMPTS.index("shallow patch of missing asphalt"),
+    TARGET_PROMPTS.index("exposed aggregate road surface"),
+    TARGET_PROMPTS.index("surface raveling on asphalt"),
+    TARGET_PROMPTS.index("broad irregular worn road patch"),
+    TARGET_PROMPTS.index("disintegrated asphalt surface area"),
+    TARGET_PROMPTS.index("exposed light colored road sublayer"),
+    # Other Defects
+    TARGET_PROMPTS.index("alligator cracking pattern on asphalt"),
+    TARGET_PROMPTS.index("longitudinal road surface crack"),
+    TARGET_PROMPTS.index("transverse crack across road"),
+    TARGET_PROMPTS.index("damaged road divider or median"),
+    TARGET_PROMPTS.index("missing circular manhole cover"),
+    TARGET_PROMPTS.index("uneven road surface bump"),
+    TARGET_PROMPTS.index("road shoulder erosion or drop-off"),
+    TARGET_PROMPTS.index("construction debris on road lane"),
+    TARGET_PROMPTS.index("loose gravel spill on road"),
     TARGET_PROMPTS.index("water puddle on asphalt road"),
     TARGET_PROMPTS.index("standing water on road surface"),
-    TARGET_PROMPTS.index("longitudinal crack on asphalt"),
-    TARGET_PROMPTS.index("road surface crack"),
     TARGET_PROMPTS.index("faded road lane marking"),
     TARGET_PROMPTS.index("worn lane line on road"),
 }
 
 # ── Prompt → Backend standard class name mapping ─────────────────────────────
-# Every prompt maps to one of the 5 backend classes used by the existing YOLO
-# detector, so results are consistent across detection modes.
 _PROMPT_TO_BACKEND_CLASS = {
     # Good signboards
     "clean traffic sign on pole": "good_sign_board",
     "intact road sign on metal post": "good_sign_board",
     "visible traffic signboard on road": "good_sign_board",
     "good condition municipal road sign": "good_sign_board",
-
-    # Triangular (good = triangular warning, defective = damaged triangular)
     "triangular warning traffic sign": "good_sign_board",
+    "circular traffic sign on road": "good_sign_board",
+    "round prohibitory traffic sign": "good_sign_board",
+    "circular no parking sign": "good_sign_board",
+    "rectangular road information sign": "good_sign_board",
+    "roadside advertisement billboard": "good_sign_board",
+    "shop signboard near road": "good_sign_board",
+    "commercial banner on roadside": "good_sign_board",
+
+    # Defect Signboards
     "faded triangular road sign red border": "defected_sign_board",
     "damaged triangle traffic sign on pole": "defected_sign_board",
     "weathered triangular signboard": "defected_sign_board",
-
-    # Circular (generic = good, defective = defected)
-    "circular traffic sign on road": "good_sign_board",
     "blank white circular traffic sign": "defected_sign_board",
     "faded erased circular road sign": "defected_sign_board",
     "shattered broken circular road sign": "defected_sign_board",
     "damaged convex road mirror sign": "defected_sign_board",
-    "round prohibitory traffic sign": "good_sign_board",
-    "circular no parking sign": "good_sign_board",
-
-    # Rectangular (generic = good, defective = defected)
-    "rectangular road information sign": "good_sign_board",
     "faded bus stop signboard": "defected_sign_board",
     "faded rectangular traffic sign pole": "defected_sign_board",
     "blank white rectangular road sign": "defected_sign_board",
-
-    # Damaged / Defective signboards (all → defected_sign_board)
     "damaged traffic signboard on road": "defected_sign_board",
     "broken traffic signboard on pole": "defected_sign_board",
     "faded traffic signboard on road": "defected_sign_board",
@@ -173,20 +191,37 @@ _PROMPT_TO_BACKEND_CLASS = {
     "cracked traffic signboard": "defected_sign_board",
     "weathered signboard with peeling paint": "defected_sign_board",
 
-    # Commercial boards (silently filtered by DEFECTIVE_CLASS_INDICES)
-    "roadside advertisement billboard": "good_sign_board",
-    "shop signboard near road": "good_sign_board",
-    "commercial banner on roadside": "good_sign_board",
-
-    # Road defects
-    "pothole on asphalt road": "pothole",
+    # Potholes & Surface Issues
+    "tiny circular pothole on road": "pothole",
+    "small shallow road pothole": "pothole",
+    "large deep crater-like pothole": "pothole",
+    "cluster of multiple small potholes": "pothole",
+    "rough potholed road surface": "pothole",
+    "developing pothole with loose asphalt": "pothole",
     "deep road pothole": "pothole",
-    "disintegrating road surface patch": "pothole",
-    "loose gravel patch on road": "pothole",
+    "shallow patch of missing asphalt": "pothole",
+    "exposed aggregate road surface": "pothole",
+    "surface raveling on asphalt": "pothole",
+    "broad irregular worn road patch": "pothole",
+    "disintegrated asphalt surface area": "pothole",
+    "exposed light colored road sublayer": "pothole",
+    "damaged road divider or median": "pothole",
+    "missing circular manhole cover": "pothole",
+    "uneven road surface bump": "pothole",
+    "road shoulder erosion or drop-off": "pothole",
+    "construction debris on road lane": "pothole",
+    "loose gravel spill on road": "pothole",
     "water puddle on asphalt road": "pothole",
     "standing water on road surface": "pothole",
-    "longitudinal crack on asphalt": "road_crack",
+
+    # Cracks
+    "alligator cracking pattern on asphalt": "road_crack",
+    "longitudinal road surface crack": "road_crack",
+    "transverse crack across road": "road_crack",
     "road surface crack": "road_crack",
+    "longitudinal crack on asphalt": "road_crack",
+
+    # Markings
     "faded road lane marking": "damaged_road_marking",
     "worn lane line on road": "damaged_road_marking",
 }

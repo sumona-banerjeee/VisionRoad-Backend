@@ -334,8 +334,17 @@ class YoloDetector(BaseDetector):
                     and tid not in pending_verify
                 ]
                 for tid in stale_tids:
+                    # check verify_cache BEFORE popping.
+                    # Only evict from rejected_tids when we have a cached verify
+                    # result (i.e. VL/SAM3 gave a definitive answer). If the
+                    # rejection came from a timeout/None pass-through path this
+                    # tid won't be in rejected_tids anyway, but we still want to
+                    # preserve any genuine rejection flag so YOLO can't silently
+                    # reuse the same numeric tracker ID on a new object.
+                    _has_cached_result = tid in verify_cache
                     verify_cache.pop(tid, None)
-                    rejected_tids.discard(tid)
+                    if _has_cached_result:
+                        rejected_tids.discard(tid)
                     tracker_class_lock.pop(tid, None)
                     tracker_history.pop(tid, None)
                     del _tid_last_seen[tid]
@@ -372,8 +381,11 @@ class YoloDetector(BaseDetector):
                 delete=False,
             )
             _ndjson_path = _ndjson_fd.name
+            # buffer frame data in memory during the loop;
+            # written to NDJSON only after post-drain filter removes rejected tids.
+            _pending_frames = []
             _frames_written = 0
-            logger.info(f"NDJSON streaming enabled — temp file: {_ndjson_path}")
+            logger.info(f"NDJSON (deferred-write) temp file: {_ndjson_path}")
             total_detections_count = 0
             frame_count = 0
             last_progress = 0
@@ -511,7 +523,8 @@ class YoloDetector(BaseDetector):
                             rejection_stats["multi_frame_pending"].add(tid)
 
                         if tid in confirmed:
-                            total_detections_count += 1
+                            # Bug 2 fix: no per-frame count increment here;
+                            # total_detections_count is recomputed after post-drain filter.
                             frame_data["detections"].append(
                                 {
                                     "frame_id": frame_count,
@@ -537,13 +550,10 @@ class YoloDetector(BaseDetector):
                                 }
                             )
 
+                # Bug 1 fix: buffer instead of writing directly to NDJSON.
+                # Actual write happens after the VL/SAM3 drain (see post-drain block).
                 if frame_data["detections"]:
-                    _ndjson_fd.write(json.dumps(frame_data) + "\n")
-                    _frames_written += 1
-                    if _frames_written % 50 == 0:
-                        logger.info(
-                            f" NDJSON streamed {_frames_written} frames to disk so far"
-                        )
+                    _pending_frames.append(frame_data)
 
                 # Progress
                 progress = int((frame_count / total_frames) * 100)
@@ -567,7 +577,12 @@ class YoloDetector(BaseDetector):
                             "total_road_damage": sum(
                                 len(counted_ids[c]) for c in ROAD_DAMAGE_CLASSES
                             ),
-                            "total_detections": total_detections_count,
+                            # Note: total_detections_count is recomputed after
+                            # the post-drain filter; use pending frame count here
+                            # as an in-progress approximation.
+                            "total_detections": sum(
+                                len(f["detections"]) for f in _pending_frames
+                            ),
                         },
                     )
                     last_progress = progress
@@ -597,6 +612,31 @@ class YoloDetector(BaseDetector):
                         del pending_verify[tid]
 
             vl_drain_end = time.time()
+
+            # ── Post-drain NDJSON filter ────────────────
+            # Now that confirmed{} is final (all VL/SAM3 results applied),
+            # filter buffered frame data to remove any rejected tids, then
+            # write surviving frames to NDJSON and recompute the true count.
+            confirmed_ids = set(confirmed.keys())
+            _frames_written = 0
+            total_detections_count = 0
+            for _fdata in _pending_frames:
+                _surviving = [
+                    d for d in _fdata["detections"]
+                    if d["detection_id"] in confirmed_ids
+                ]
+                if _surviving:
+                    _fdata["detections"] = _surviving
+                    _ndjson_fd.write(json.dumps(_fdata) + "\n")
+                    _frames_written += 1
+                    total_detections_count += len(_surviving)
+            del _pending_frames  # release memory
+            logger.info(
+                f"NDJSON post-drain filter — {_frames_written} frames, "
+                f"{total_detections_count} detections written "
+                f"(rejected tids filtered from frame data)"
+            )
+            # ────────────────────────────────────────────────────────────────
 
             # Build final results — time GPS coord lookup here
             defected_sign_board_list = self._get_class_list(

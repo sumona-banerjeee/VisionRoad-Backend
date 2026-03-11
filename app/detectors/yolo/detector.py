@@ -39,7 +39,11 @@ CONF_THRESHOLD = 0.50
 # Performance tuning
 FRAME_SKIP = int(os.getenv("FRAME_SKIP", "2"))  # Process every Nth frame (1=no skip)
 YOLO_IMGSZ = int(os.getenv("YOLO_IMGSZ", "640"))  # YOLO inference resolution
-USE_HALF = torch.cuda.is_available()  # FP16 on GPU, FP32 on CPU
+# Use FP16 only when CUDA is available AND the GPU supports float16 (not bfloat16).
+# Newer Ultralytics (8.3+) may internally pick bfloat16 when half=True, which crashes
+# on older consumer GPUs (GTX, RTX 20xx) that don't have bf16 hardware support.
+_bf16_supported = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+USE_HALF = torch.cuda.is_available() and not _bf16_supported
 
 # Road damage classes
 ROAD_DAMAGE_CLASSES = {

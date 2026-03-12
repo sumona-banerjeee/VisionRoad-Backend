@@ -32,7 +32,7 @@ from app.db.crud_hierarchy import find_location_by_gps
 logger = logging.getLogger(__name__)
 
 # Configuration
-MODEL_PATH = "models/best-11m.pt"
+MODEL_PATH = r"models\best-11m.pt"
 TRACKER = "botsort.yaml"
 CONF_THRESHOLD = 0.50
 
@@ -93,10 +93,35 @@ class YoloDetector(BaseDetector):
         """Calculate Euclidean distance between two points"""
         return ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
 
+    @staticmethod
+    def calculate_ios(box1, box2):
+        """Calculate Intersection over Smaller Box (IoS)"""
+        x1_1, y1_1, x2_1, y2_1 = box1
+        x1_2, y1_2, x2_2, y2_2 = box2
+
+        x_left = max(x1_1, x1_2)
+        y_top = max(y1_1, y1_2)
+        x_right = min(x2_1, x2_2)
+        y_bottom = min(y2_1, y2_2)
+
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+
+        smaller_area = min(area1, area2)
+        if smaller_area == 0:
+            return 0.0
+
+        return intersection_area / smaller_area
+
     def is_duplicate_location(
         self,
         cx,
         cy,
+        bbox,
         class_name,
         current_time,
         spatial_locations,
@@ -123,6 +148,12 @@ class YoloDetector(BaseDetector):
             if distance < min_distance_threshold:
                 time_gap = current_time - existing["time"]
                 return True, f"{distance:.1f}px from existing, {time_gap:.2f}s ago"
+
+            if bbox is not None and "bbox" in existing:
+                ios = self.calculate_ios(bbox, existing["bbox"])
+                if ios > 0.5: # adjust threshold
+                    time_gap = current_time - existing["time"]
+                    return True, f"Overlap IoS {ios:.2f} with existing, {time_gap:.2f}s ago"
 
         return False, None
 
@@ -232,7 +263,11 @@ class YoloDetector(BaseDetector):
                 if class_name in counted_ids:
                     counted_ids[class_name].add(tid)
                 spatial_locations[class_name].append(
-                    {"center": (cx, cy), "time": current_time}
+                    {
+                        "center": (cx, cy),
+                        "time": current_time,
+                        "bbox": (x1, y1, x2, y2),
+                    }
                 )
                 rejection_stats["multi_frame_pending"].discard(tid)
 
@@ -334,8 +369,17 @@ class YoloDetector(BaseDetector):
                     and tid not in pending_verify
                 ]
                 for tid in stale_tids:
+                    # check verify_cache BEFORE popping.
+                    # Only evict from rejected_tids when we have a cached verify
+                    # result (i.e. VL/SAM3 gave a definitive answer). If the
+                    # rejection came from a timeout/None pass-through path this
+                    # tid won't be in rejected_tids anyway, but we still want to
+                    # preserve any genuine rejection flag so YOLO can't silently
+                    # reuse the same numeric tracker ID on a new object.
+                    _has_cached_result = tid in verify_cache
                     verify_cache.pop(tid, None)
-                    rejected_tids.discard(tid)
+                    if _has_cached_result:
+                        rejected_tids.discard(tid)
                     tracker_class_lock.pop(tid, None)
                     tracker_history.pop(tid, None)
                     del _tid_last_seen[tid]
@@ -372,8 +416,11 @@ class YoloDetector(BaseDetector):
                 delete=False,
             )
             _ndjson_path = _ndjson_fd.name
+            # buffer frame data in memory during the loop;
+            # written to NDJSON only after post-drain filter removes rejected tids.
+            _pending_frames = []
             _frames_written = 0
-            logger.info(f"NDJSON streaming enabled — temp file: {_ndjson_path}")
+            logger.info(f"NDJSON (deferred-write) temp file: {_ndjson_path}")
             total_detections_count = 0
             frame_count = 0
             last_progress = 0
@@ -463,6 +510,7 @@ class YoloDetector(BaseDetector):
                             is_dup, _ = self.is_duplicate_location(
                                 cx,
                                 cy,
+                                (x1, y1, x2, y2),
                                 class_name,
                                 current_time,
                                 spatial_locations,
@@ -511,7 +559,8 @@ class YoloDetector(BaseDetector):
                             rejection_stats["multi_frame_pending"].add(tid)
 
                         if tid in confirmed:
-                            total_detections_count += 1
+                            # Bug 2 fix: no per-frame count increment here;
+                            # total_detections_count is recomputed after post-drain filter.
                             frame_data["detections"].append(
                                 {
                                     "frame_id": frame_count,
@@ -537,13 +586,10 @@ class YoloDetector(BaseDetector):
                                 }
                             )
 
+                # Bug 1 fix: buffer instead of writing directly to NDJSON.
+                # Actual write happens after the VL/SAM3 drain (see post-drain block).
                 if frame_data["detections"]:
-                    _ndjson_fd.write(json.dumps(frame_data) + "\n")
-                    _frames_written += 1
-                    if _frames_written % 50 == 0:
-                        logger.info(
-                            f" NDJSON streamed {_frames_written} frames to disk so far"
-                        )
+                    _pending_frames.append(frame_data)
 
                 # Progress
                 progress = int((frame_count / total_frames) * 100)
@@ -567,7 +613,12 @@ class YoloDetector(BaseDetector):
                             "total_road_damage": sum(
                                 len(counted_ids[c]) for c in ROAD_DAMAGE_CLASSES
                             ),
-                            "total_detections": total_detections_count,
+                            # Note: total_detections_count is recomputed after
+                            # the post-drain filter; use pending frame count here
+                            # as an in-progress approximation.
+                            "total_detections": sum(
+                                len(f["detections"]) for f in _pending_frames
+                            ),
                         },
                     )
                     last_progress = progress
@@ -597,6 +648,31 @@ class YoloDetector(BaseDetector):
                         del pending_verify[tid]
 
             vl_drain_end = time.time()
+
+            # ── Post-drain NDJSON filter ────────────────
+            # Now that confirmed{} is final (all VL/SAM3 results applied),
+            # filter buffered frame data to remove any rejected tids, then
+            # write surviving frames to NDJSON and recompute the true count.
+            confirmed_ids = set(confirmed.keys())
+            _frames_written = 0
+            total_detections_count = 0
+            for _fdata in _pending_frames:
+                _surviving = [
+                    d for d in _fdata["detections"]
+                    if d["detection_id"] in confirmed_ids
+                ]
+                if _surviving:
+                    _fdata["detections"] = _surviving
+                    _ndjson_fd.write(json.dumps(_fdata) + "\n")
+                    _frames_written += 1
+                    total_detections_count += len(_surviving)
+            del _pending_frames  # release memory
+            logger.info(
+                f"NDJSON post-drain filter — {_frames_written} frames, "
+                f"{total_detections_count} detections written "
+                f"(rejected tids filtered from frame data)"
+            )
+            # ────────────────────────────────────────────────────────────────
 
             # Build final results — time GPS coord lookup here
             defected_sign_board_list = self._get_class_list(

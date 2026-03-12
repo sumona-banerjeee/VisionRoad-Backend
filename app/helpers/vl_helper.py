@@ -147,12 +147,16 @@ def process_with_vl(frame, bbox, predicted_class):
 
         # Optimized prompt for token efficiency
         prompt = (
-            "Look at this image and classify it as exactly ONE of: "
-            "defected_sign_board, good_sign_board, pothole, road_crack, damaged_road_marking. "
-            'If the image does NOT match any of these categories, set category to "null" '
-            "and belongs_to_category to false. "
-            "If it DOES match a category, set belongs_to_category to true. "
-            'Respond with JSON: {"category": "name_or_null", "confidence": "high/medium/low", '
+            "You are a road infrastructure inspector. "
+            f"YOLO predicted this crop as: {predicted_class}. Verify if correct.\n"
+            "Classify as exactly ONE of:\n"
+            "- defected_sign_board (traffic/road regulatory sign: damaged, faded, or vandalized)\n"
+            "- good_sign_board (traffic/road regulatory sign: intact and legible)\n"
+            "- pothole (road surface hole or depression)\n"
+            "- road_crack (crack or fracture in road/pavement surface)\n"
+            "- damaged_road_marking (faded or worn lane lines or road paint)\n"
+            "Non-traffic signs (shop signs, billboards, banners, posters) → null.\n"
+            'JSON only: {"category": "name_or_null", "confidence": "high/medium/low", '
             '"belongs_to_category": true/false}'
         )
 

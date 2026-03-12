@@ -93,10 +93,35 @@ class YoloDetector(BaseDetector):
         """Calculate Euclidean distance between two points"""
         return ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
 
+    @staticmethod
+    def calculate_ios(box1, box2):
+        """Calculate Intersection over Smaller Box (IoS)"""
+        x1_1, y1_1, x2_1, y2_1 = box1
+        x1_2, y1_2, x2_2, y2_2 = box2
+
+        x_left = max(x1_1, x1_2)
+        y_top = max(y1_1, y1_2)
+        x_right = min(x2_1, x2_2)
+        y_bottom = min(y2_1, y2_2)
+
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+
+        smaller_area = min(area1, area2)
+        if smaller_area == 0:
+            return 0.0
+
+        return intersection_area / smaller_area
+
     def is_duplicate_location(
         self,
         cx,
         cy,
+        bbox,
         class_name,
         current_time,
         spatial_locations,
@@ -123,6 +148,12 @@ class YoloDetector(BaseDetector):
             if distance < min_distance_threshold:
                 time_gap = current_time - existing["time"]
                 return True, f"{distance:.1f}px from existing, {time_gap:.2f}s ago"
+
+            if bbox is not None and "bbox" in existing:
+                ios = self.calculate_ios(bbox, existing["bbox"])
+                if ios > 0.5: # adjust threshold
+                    time_gap = current_time - existing["time"]
+                    return True, f"Overlap IoS {ios:.2f} with existing, {time_gap:.2f}s ago"
 
         return False, None
 
@@ -232,7 +263,11 @@ class YoloDetector(BaseDetector):
                 if class_name in counted_ids:
                     counted_ids[class_name].add(tid)
                 spatial_locations[class_name].append(
-                    {"center": (cx, cy), "time": current_time}
+                    {
+                        "center": (cx, cy),
+                        "time": current_time,
+                        "bbox": (x1, y1, x2, y2),
+                    }
                 )
                 rejection_stats["multi_frame_pending"].discard(tid)
 
@@ -475,6 +510,7 @@ class YoloDetector(BaseDetector):
                             is_dup, _ = self.is_duplicate_location(
                                 cx,
                                 cy,
+                                (x1, y1, x2, y2),
                                 class_name,
                                 current_time,
                                 spatial_locations,

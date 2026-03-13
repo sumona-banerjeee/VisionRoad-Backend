@@ -71,13 +71,14 @@ class YoloDetector(BaseDetector):
         detection_mode: String label for the detection mode (e.g. "yolo", "yolo_vl", "sam3").
     """
 
-    def __init__(self, verify_fn=None, detection_mode="yolo", conf_threshold=CONF_THRESHOLD, apply_roi=True):
+    def __init__(self, verify_fn=None, detection_mode="yolo", conf_threshold=CONF_THRESHOLD, apply_roi=True, apply_spatial_dedup=True):
         """Initialize detector with YOLO model and optional verification callback."""
         super().__init__(model_path=MODEL_PATH)
         self.verify_fn = verify_fn
         self.detection_mode = detection_mode
         self.conf_threshold = conf_threshold
         self.apply_roi = apply_roi
+        self.apply_spatial_dedup = apply_spatial_dedup
 
         mode_label = f"YOLO+verify ({self.detection_mode})" if self.verify_fn else "YOLO-only"
         logger.info(f"YoloDetector ready — mode: {mode_label}")
@@ -165,7 +166,9 @@ class YoloDetector(BaseDetector):
             # Adaptive parameters
             DETECTION_TIME_WINDOW = video_duration * 0.25
             TIME_THRESHOLD = video_duration * 0.30
-            HIGH_CONFIDENCE_THRESHOLD = 0.75
+            # If the base confidence threshold is higher than 0.75, use that. Or just use 0.75.
+            # But the user's model reaches 0.89, so it triggers the 1-frame minimum.
+            HIGH_CONFIDENCE_THRESHOLD = max(0.75, self.conf_threshold)
             LOW_CONFIDENCE_MIN_FRAMES = 2
             MIN_DISTANCE_THRESHOLD = 120
 
@@ -451,15 +454,19 @@ class YoloDetector(BaseDetector):
                             and tid not in confirmed
                             and tid not in rejected_tids
                         ):
-                            is_dup, _ = self.is_duplicate_location(
-                                cx,
-                                cy,
-                                class_name,
-                                current_time,
-                                spatial_locations,
-                                TIME_THRESHOLD,
-                                MIN_DISTANCE_THRESHOLD,
-                            )
+                            if self.apply_spatial_dedup:
+                                is_dup, _ = self.is_duplicate_location(
+                                    cx,
+                                    cy,
+                                    class_name,
+                                    current_time,
+                                    spatial_locations,
+                                    TIME_THRESHOLD,
+                                    MIN_DISTANCE_THRESHOLD,
+                                )
+                            else:
+                                is_dup = False
+                                
                             if not is_dup:
                                 # Optimistic accept — confirm now, let verify callback check async
                                 _confirm_detection(

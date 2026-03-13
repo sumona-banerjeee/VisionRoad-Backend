@@ -50,6 +50,7 @@ class YoloeTrainedVlDetector(YoloDetector):
             detection_mode="yoloe_trained_vl",
             conf_threshold=YOLOE_TRAINED_CONF,
             apply_roi=False,
+            apply_spatial_dedup=False,
         )
         logger.info(
             f"YoloeTrainedVlDetector ready — model={YOLOE_TRAINED_MODEL_PATH}, "

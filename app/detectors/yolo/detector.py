@@ -321,10 +321,13 @@ class YoloDetector(BaseDetector):
                     and tid not in pending_verify
                 ]
                 for tid in stale_tids:
-                    verify_cache.pop(tid, None)
+                    if tid in verify_cache:
+                        del verify_cache[tid]
                     rejected_tids.discard(tid)
-                    tracker_class_lock.pop(tid, None)
-                    tracker_history.pop(tid, None)
+                    if tid in tracker_class_lock:
+                        del tracker_class_lock[tid]
+                    if tid in tracker_history:
+                        del tracker_history[tid]
                     del _tid_last_seen[tid]
                 if stale_tids:
                     logger.info(
@@ -665,7 +668,13 @@ class YoloDetector(BaseDetector):
                 "damaged_road_marking_list": damaged_road_marking_list,
                 "good_sign_board_list": good_sign_board_list,
                 # Read back streamed frames from NDJSON temp file
-                "frames": self._read_ndjson_frames(_ndjson_fd, _ndjson_path, _frames_written),
+                "frames": self._read_ndjson_frames(
+                    _ndjson_fd, 
+                    _ndjson_path, 
+                    _frames_written,
+                    confirmed=confirmed,
+                    rejected_tids=rejected_tids,
+                ),
             }
 
             detection_results[video_id] = results
@@ -776,17 +785,34 @@ class YoloDetector(BaseDetector):
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     @staticmethod
-    def _read_ndjson_frames(ndjson_fd, ndjson_path: str, expected_count: int = 0) -> list:
-        """Close the NDJSON temp file and read all frame lines back as a list."""
+    def _read_ndjson_frames(ndjson_fd, ndjson_path: str, expected_count: int = 0, confirmed: dict = None, rejected_tids: set = None) -> list:
+        """Close the NDJSON temp file and read all frame lines back as a list, applying final VL overrides."""
         if not ndjson_fd.closed:
             ndjson_fd.close()
         frames = []
+        confirmed = confirmed or {}
+        rejected_tids = rejected_tids or set()
+
         try:
             with open(ndjson_path, "r") as f:
                 for line in f:
                     line = line.strip()
                     if line:
-                        frames.append(json.loads(line))
+                        frame_data = json.loads(line)
+                        # Backfill final confirmed classes and strip rejected ones
+                        valid_detections = []
+                        for det in frame_data.get("detections", []):
+                            tid = det.get("detection_id")
+                            if tid in rejected_tids:
+                                continue  # VL rejected this eventually
+                            if tid in confirmed:
+                                # VL might have overridden the type asynchronously after this frame was written
+                                det["type"] = confirmed[tid]["type"]
+                                valid_detections.append(det)
+                        
+                        if valid_detections:
+                            frame_data["detections"] = valid_detections
+                            frames.append(frame_data)
         except Exception as e:
             logger.warning(f"Failed to read back NDJSON frames: {e}")
         logger.info(

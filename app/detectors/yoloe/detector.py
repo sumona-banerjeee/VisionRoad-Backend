@@ -1,5 +1,5 @@
 """
-YoloeDetector — YOLOE open-vocabulary detection with BoTSORT tracking.
+YoloeDetector — Fine-tuned YOLOE detection with BoTSORT tracking.
 
 Mirrors the YoloDetector flow exactly:
   • BoTSORT tracking (model.track) for persistent track IDs
@@ -9,11 +9,10 @@ Mirrors the YoloDetector flow exactly:
   • GPS matching, NDJSON streaming, DB saving
 
 The only difference from YoloDetector is:
-  • Uses YOLOE model with open-vocabulary text prompts
-  • Post-tracking filtering: display label mapping, per-category confidence,
-    5 pothole post-detection filters (shadow/size/texture/aspect/brightness)
+  • Uses a fine-tuned YOLOE model (5 classes, 0.70 confidence)
+  • Skips good_sign_board detections by default
 
-Output classes: defected_sign_board, pothole
+Output classes: defected_sign_board, good_sign_board, pothole, road_crack, damaged_road_marking
 """
 
 import cv2
@@ -37,15 +36,10 @@ from app.models.detection import Detection
 from app.services.location_mapper import find_location_by_gps
 from app.helpers.yoloe_helper import (
     load_yoloe_model,
-    get_display_label,
-    get_conf_threshold,
-    _run_pothole_filters,
     ROAD_DAMAGE_CLASSES,
     ALL_CLASSES,
+    EXCLUDED_CLASSES,
     YOLOE_CONF_THRESHOLD,
-    YOLOE_CONF_SIGNBOARD,
-    YOLOE_CONF_POTHOLE,
-    NUM_TARGET_CLASSES,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,16 +53,16 @@ USE_HALF = torch.cuda.is_available()
 
 class YoloeDetector(BaseDetector):
     """
-    YOLOE open-vocabulary detector with BoTSORT tracking.
+    Fine-tuned YOLOE detector with BoTSORT tracking.
 
     Uses the same tracking + confirmation + dedup pipeline as YoloDetector.
-    Detections are filtered through YOLOE-specific prompt mapping,
-    per-category confidence thresholds, and pothole post-detection filters.
+    The fine-tuned model directly outputs 5 class names — no prompt mapping
+    or post-detection filtering needed.
     """
 
     def __init__(self):
         # Skip BaseDetector.__init__ because it loads a YOLO model;
-        # we use a YOLOE model instead, loaded lazily via yoloe_helper.
+        # we use a fine-tuned YOLOE model instead, loaded lazily via yoloe_helper.
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.model = None
         self.detection_mode = "yoloe"
@@ -176,7 +170,7 @@ class YoloeDetector(BaseDetector):
             logger.info(
                 f"YOLOE settings: FRAME_SKIP={FRAME_SKIP}, IMGSZ={YOLOE_IMGSZ}, "
                 f"FP16={'ON' if USE_HALF else 'OFF'}, TRACKER={TRACKER}, "
-                f"CONF_SIGN={YOLOE_CONF_SIGNBOARD}, CONF_POT={YOLOE_CONF_POTHOLE}"
+                f"CONF_THRESHOLD={YOLOE_CONF_THRESHOLD}"
             )
 
             # Adaptive parameters (same as YoloDetector)
@@ -249,9 +243,7 @@ class YoloeDetector(BaseDetector):
                 "spatial_duplicate": 0,
                 "roi_outside": 0,
                 "class_mismatch": 0,
-                "prompt_filtered": 0,
-                "conf_filtered": 0,
-                "pothole_filtered": 0,
+                "excluded_class": 0,
                 "vl_mismatch": 0,
                 "vl_errors": 0,
             }
@@ -319,32 +311,12 @@ class YoloeDetector(BaseDetector):
                         x1, y1, x2, y2 = map(int, box)
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-                        # Skip anything outside our target classes
-                        if cls_id >= NUM_TARGET_CLASSES:
+                        class_name = names.get(cls_id, f"class_{cls_id}")
+
+                        # ── Skip excluded classes (good_sign_board) ────────────
+                        if class_name in EXCLUDED_CLASSES:
+                            rejection_stats["excluded_class"] += 1
                             continue
-
-                        prompt_name = names.get(cls_id, f"class_{cls_id}")
-
-                        # ── YOLOE Filter 1: Map prompt → backend class ────────
-                        backend_class = get_display_label(prompt_name)
-                        if backend_class is None:
-                            rejection_stats["prompt_filtered"] += 1
-                            continue
-
-                        # ── YOLOE Filter 2: Per-category confidence ───────────
-                        min_conf = get_conf_threshold(prompt_name)
-                        if conf < min_conf:
-                            rejection_stats["conf_filtered"] += 1
-                            continue
-
-                        # ── YOLOE Filter 3: Pothole post-detection filters ────
-                        if backend_class == "pothole":
-                            skip, reason = _run_pothole_filters(
-                                frame, x1, y1, x2, y2
-                            )
-                            if skip:
-                                rejection_stats["pothole_filtered"] += 1
-                                continue
 
                         # ── ROI filter (same as YoloDetector) ─────────────────
                         if not (
@@ -356,11 +328,11 @@ class YoloeDetector(BaseDetector):
 
                         # ── Tracker class lock (same as YoloDetector) ─────────
                         if tid in tracker_class_lock:
-                            if tracker_class_lock[tid] != backend_class:
+                            if tracker_class_lock[tid] != class_name:
                                 rejection_stats["class_mismatch"] += 1
                                 continue
                         else:
-                            tracker_class_lock[tid] = backend_class
+                            tracker_class_lock[tid] = class_name
 
                         # ── Multi-frame confirmation (same as YoloDetector) ───
                         tracker_history[tid].append(current_time)
@@ -384,7 +356,7 @@ class YoloeDetector(BaseDetector):
                             is_dup, _ = self.is_duplicate_location(
                                 cx,
                                 cy,
-                                backend_class,
+                                class_name,
                                 current_time,
                                 spatial_locations,
                                 TIME_THRESHOLD,
@@ -393,7 +365,7 @@ class YoloeDetector(BaseDetector):
                             if not is_dup:
                                 _confirm_detection(
                                     tid,
-                                    backend_class,
+                                    class_name,
                                     frame_count,
                                     current_time,
                                     conf,
@@ -412,8 +384,7 @@ class YoloeDetector(BaseDetector):
                                 {
                                     "frame_id": frame_count,
                                     "detection_id": tid,
-                                    "type": backend_class,
-                                    "prompt_name": prompt_name,
+                                    "type": class_name,
                                     "confidence": round(float(conf), 3),
                                     "count": {
                                         "defected_sign_board": len(
@@ -422,9 +393,15 @@ class YoloeDetector(BaseDetector):
                                         "pothole": len(
                                             counted_ids.get("pothole", set())
                                         ),
-                                        "road_crack": 0,
-                                        "damaged_road_marking": 0,
-                                        "good_sign_board": 0,
+                                        "road_crack": len(
+                                            counted_ids.get("road_crack", set())
+                                        ),
+                                        "damaged_road_marking": len(
+                                            counted_ids.get("damaged_road_marking", set())
+                                        ),
+                                        "good_sign_board": len(
+                                            counted_ids.get("good_sign_board", set())
+                                        ),
                                     },
                                     "bbox": {
                                         "x1": x1, "y1": y1,
@@ -453,9 +430,15 @@ class YoloeDetector(BaseDetector):
                             "unique_defected_sign_board": len(
                                 counted_ids.get("defected_sign_board", set())
                             ),
-                            "unique_road_crack": 0,
-                            "unique_damaged_road_marking": 0,
-                            "unique_good_sign_board": 0,
+                            "unique_road_crack": len(
+                                counted_ids.get("road_crack", set())
+                            ),
+                            "unique_damaged_road_marking": len(
+                                counted_ids.get("damaged_road_marking", set())
+                            ),
+                            "unique_good_sign_board": len(
+                                counted_ids.get("good_sign_board", set())
+                            ),
                             "total_road_damage": sum(
                                 len(counted_ids.get(c, set()))
                                 for c in ROAD_DAMAGE_CLASSES
@@ -475,6 +458,15 @@ class YoloeDetector(BaseDetector):
             )
             pothole_list = self._get_class_list(
                 confirmed, "pothole", gps_points, perf_timings
+            )
+            road_crack_list = self._get_class_list(
+                confirmed, "road_crack", gps_points, perf_timings
+            )
+            damaged_road_marking_list = self._get_class_list(
+                confirmed, "damaged_road_marking", gps_points, perf_timings
+            )
+            good_sign_board_list = self._get_class_list(
+                confirmed, "good_sign_board", gps_points, perf_timings
             )
 
             frames_with_detections = _frames_written
@@ -510,9 +502,15 @@ class YoloeDetector(BaseDetector):
                     "unique_pothole": len(
                         counted_ids.get("pothole", set())
                     ),
-                    "unique_road_crack": 0,
-                    "unique_damaged_road_marking": 0,
-                    "unique_good_sign_board": 0,
+                    "unique_road_crack": len(
+                        counted_ids.get("road_crack", set())
+                    ),
+                    "unique_damaged_road_marking": len(
+                        counted_ids.get("damaged_road_marking", set())
+                    ),
+                    "unique_good_sign_board": len(
+                        counted_ids.get("good_sign_board", set())
+                    ),
                     "total_road_damage": sum(
                         len(counted_ids.get(c, set()))
                         for c in ROAD_DAMAGE_CLASSES
@@ -528,18 +526,16 @@ class YoloeDetector(BaseDetector):
                     "spatial_duplicate": rejection_stats["spatial_duplicate"],
                     "class_mismatch": rejection_stats["class_mismatch"],
                     "roi_outside": rejection_stats["roi_outside"],
-                    "prompt_filtered": rejection_stats["prompt_filtered"],
-                    "conf_filtered": rejection_stats["conf_filtered"],
-                    "pothole_filtered": rejection_stats["pothole_filtered"],
+                    "excluded_class": rejection_stats["excluded_class"],
                     "vl_mismatch": 0,
                     "vl_errors": 0,
                 },
                 "vl_stats": None,
                 "defected_sign_board_list": defected_sign_board_list,
                 "pothole_list": pothole_list,
-                "road_crack_list": [],
-                "damaged_road_marking_list": [],
-                "good_sign_board_list": [],
+                "road_crack_list": road_crack_list,
+                "damaged_road_marking_list": damaged_road_marking_list,
+                "good_sign_board_list": good_sign_board_list,
                 "frames": frames,
             }
 
@@ -549,7 +545,11 @@ class YoloeDetector(BaseDetector):
 
             # Save to DB
             all_detections_flat = (
-                defected_sign_board_list + pothole_list
+                defected_sign_board_list
+                + pothole_list
+                + road_crack_list
+                + damaged_road_marking_list
+                + good_sign_board_list
             )
             self._save_to_db(video_id, all_detections_flat, perf_timings)
 

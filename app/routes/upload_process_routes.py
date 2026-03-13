@@ -37,6 +37,7 @@ async def upload_video(
       - yolo_vl  : YOLO + VL verification (default)
       - sam3     : SAM3-based detection (not yet implemented)
       - yoloe    : YOLOE open-vocabulary detection (text-prompted)
+      - yoloe_trained_vl
     """
     return await upload_service.upload_video(
         file=file,

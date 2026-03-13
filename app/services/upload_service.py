@@ -23,12 +23,15 @@ class DetectionMode(str, Enum):
     - YOLO     : YOLO-only inference (fast, no VL API calls)
     - YOLO_VL  : YOLO inference + async VL cross-verification
     - SAM3     : SAM3-based detection (not yet implemented — stub)
+    - YOLOE
+    - YOLOE_TRAINED_VL
     """
 
     YOLO = "yolo"
     YOLO_VL = "yolo_vl"
     SAM3 = "sam3"
     YOLOE = "yoloe"
+    YOLOE_TRAINED_VL = "yoloe_trained_vl"
 
 
 # Keep backward-compatible alias so other internal code can still import DetectionType

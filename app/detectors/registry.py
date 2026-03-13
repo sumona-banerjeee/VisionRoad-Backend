@@ -19,10 +19,12 @@ from app.detectors.yolo.detector import YoloDetector
 from app.detectors.yoloe.detector import YoloeDetector
 from app.helpers.vl_helper import process_with_vl
 from app.helpers.sam3_helper import process_with_sam3
+from app.detectors.yoloe_trained_vl.detector import YoloeTrainedVlDetector
 
 DETECTOR_REGISTRY = {
     "yolo": lambda: YoloDetector(detection_mode="yolo"),
     "yolo_vl": lambda: YoloDetector(verify_fn=process_with_vl, detection_mode="yolo_vl"),
     "sam3": lambda: YoloDetector(verify_fn=process_with_sam3, detection_mode="sam3"),
     "yoloe": lambda: YoloeDetector(),
+    "yoloe_trained_vl": lambda: YoloeTrainedVlDetector(),
 }

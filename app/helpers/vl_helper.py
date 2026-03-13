@@ -24,6 +24,10 @@ VL_MODEL = "qwen3-vl:235b-instruct-cloud"
 VL_IMAGE_MAX_SIZE = 512  # Max dimension for VL input images
 VL_MIN_BBOX_SIZE = 30  # Skip VL for bboxes smaller than this
 VL_TIMEOUT = int(os.getenv("VL_TIMEOUT_SECONDS", "30"))  # Hard timeout
+# Bboxes with BOTH width AND height >= this are considered "large enough" and
+# are sent as tight crops (they already have sufficient detail for VL).
+# Smaller bboxes get 2× padding so VL can see environmental context.
+VL_CONTEXT_BBOX_THRESHOLD = int(os.getenv("VL_CONTEXT_BBOX_THRESHOLD", "150"))
 
 # Thread pool for timeout enforcement inside VL calls
 _vl_timeout_executor = ThreadPoolExecutor(
@@ -130,25 +134,59 @@ def process_with_vl(frame, bbox, predicted_class):
             f"(key: ...{api_key[-4:]})"
         )
 
-        # Crop detection region
-        cropped = frame[y1:y2, x1:x2]
+        # ── Adaptive crop: tight vs. context-padded ────────────────────────
+        # Large bbox (≥ threshold on both sides): the object fills the crop
+        # well enough — send the tight bbox as-is (existing behaviour).
+        # Small bbox: add 2× padding on each side so VL can see the
+        # surrounding environment (sky, road, trees) and judge plausibility.
+        frame_h, frame_w = frame.shape[:2]
+        large_bbox = (
+            bbox_width >= VL_CONTEXT_BBOX_THRESHOLD
+            and bbox_height >= VL_CONTEXT_BBOX_THRESHOLD
+        )
+        if large_bbox:
+            cropped = frame[y1:y2, x1:x2]
+            with_context = False
+        else:
+            # Expand by 2× bbox dimensions on each side, clamped to frame edges
+            pad_x = bbox_width      # 2× means one full bbox-width on each side
+            pad_y = bbox_height
+            ctx_x1 = max(0, x1 - pad_x)
+            ctx_y1 = max(0, y1 - pad_y)
+            ctx_x2 = min(frame_w, x2 + pad_x)
+            ctx_y2 = min(frame_h, y2 + pad_y)
+            cropped = frame[ctx_y1:ctx_y2, ctx_x1:ctx_x2]
+            with_context = True
+            logger.debug(
+                f"VL context-crop: bbox={bbox_width}x{bbox_height} → "
+                f"context patch={ctx_x2-ctx_x1}x{ctx_y2-ctx_y1}"
+            )
+        # ────────────────────────────────────────────────────────────────────
 
         # Resize to optimize tokens (maintain aspect ratio)
-        max_dim = max(bbox_width, bbox_height)
+        crop_h, crop_w = cropped.shape[:2]
+        max_dim = max(crop_w, crop_h)
         if max_dim > VL_IMAGE_MAX_SIZE:
             scale = VL_IMAGE_MAX_SIZE / max_dim
-            new_width = int(bbox_width * scale)
-            new_height = int(bbox_height * scale)
-            cropped = cv2.resize(cropped, (new_width, new_height))
+            cropped = cv2.resize(
+                cropped, (int(crop_w * scale), int(crop_h * scale))
+            )
 
         # Encode to base64
         _, buffer = cv2.imencode(".jpg", cropped, [cv2.IMWRITE_JPEG_QUALITY, 85])
         base64_image = base64.b64encode(buffer).decode("utf-8")
 
-        # Optimized prompt for token efficiency
+        # Optimized prompt for token efficiency.
+        # When context padding is included, explicitly tell VL to use the
+        # surroundings (sky, road surface, vegetation) in its decision.
+        context_hint = (
+            "The image shows the detected object WITH surrounding environment context — "
+            "use the surroundings (road surface, sky, background) to judge plausibility. "
+        ) if with_context else ""
         prompt = (
             "You are a road infrastructure inspector. "
-            f"YOLO predicted this crop as: {predicted_class}. Verify if correct.\n"
+            f"{context_hint}"
+            f"YOLO predicted this {'region' if with_context else 'crop'} as: {predicted_class}. Verify if correct.\n"
             "Classify as exactly ONE of:\n"
             "- defected_sign_board (traffic/road regulatory sign: damaged, faded, or vandalized)\n"
             "- good_sign_board (traffic/road regulatory sign: intact and legible)\n"
@@ -156,6 +194,7 @@ def process_with_vl(frame, bbox, predicted_class):
             "- road_crack (crack or fracture in road/pavement surface)\n"
             "- damaged_road_marking (faded or worn lane lines or road paint)\n"
             "Non-traffic signs (shop signs, billboards, banners, posters) → null.\n"
+            "If the object appears to be in the sky, on a wall, or otherwise NOT on a road surface, set belongs_to_category=false.\n"
             'JSON only: {"category": "name_or_null", "confidence": "high/medium/low", '
             '"belongs_to_category": true/false}'
         )

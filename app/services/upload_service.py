@@ -30,6 +30,7 @@ class DetectionMode(str, Enum):
     YOLO_VL = "yolo_vl"
     SAM3 = "sam3"
     YOLOE = "yoloe"
+    YOLOE_TRAINED_VL = "yoloe_trained_vl"
 
 
 # Keep backward-compatible alias so other internal code can still import DetectionType

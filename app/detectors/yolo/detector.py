@@ -71,11 +71,12 @@ class YoloDetector(BaseDetector):
         detection_mode: String label for the detection mode (e.g. "yolo", "yolo_vl", "sam3").
     """
 
-    def __init__(self, verify_fn=None, detection_mode="yolo"):
+    def __init__(self, verify_fn=None, detection_mode="yolo", conf_threshold=CONF_THRESHOLD):
         """Initialize detector with YOLO model and optional verification callback."""
         super().__init__(model_path=MODEL_PATH)
         self.verify_fn = verify_fn
         self.detection_mode = detection_mode
+        self.conf_threshold = conf_threshold
 
         mode_label = f"YOLO+verify ({self.detection_mode})" if self.verify_fn else "YOLO-only"
         logger.info(f"YoloDetector ready — mode: {mode_label}")
@@ -156,7 +157,8 @@ class YoloDetector(BaseDetector):
             )
             logger.info(
                 f"Performance settings: FRAME_SKIP={FRAME_SKIP}, YOLO_IMGSZ={YOLO_IMGSZ}, "
-                f"FP16={'ON' if USE_HALF else 'OFF'}, VERIFY={'ON' if has_verify else 'OFF'}"
+                f"FP16={'ON' if USE_HALF else 'OFF'}, VERIFY={'ON' if has_verify else 'OFF'}, "
+                f"CONF={self.conf_threshold}"
             )
 
             # Adaptive parameters
@@ -383,7 +385,7 @@ class YoloDetector(BaseDetector):
                     results = self.model.track(
                         frame,
                         persist=True,
-                        conf=CONF_THRESHOLD,
+                        conf=self.conf_threshold,
                         tracker=TRACKER,
                         verbose=False,
                         device=self.device,
@@ -500,7 +502,7 @@ class YoloDetector(BaseDetector):
                                 {
                                     "frame_id": frame_count,
                                     "detection_id": tid,
-                                    "type": class_name,
+                                    "type": confirmed[tid]["type"],
                                     "confidence": round(float(conf), 3),
                                     "count": {
                                         "defected_sign_board": len(

@@ -112,6 +112,7 @@ Test/video
 Test/output
 Test/image
 Test/img
+Test/drain_data
 
 
 yoloe-11l-seg.pt

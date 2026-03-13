@@ -197,7 +197,7 @@ class YoloDetector(BaseDetector):
             )
             logger.info(
                 f"Performance settings: FRAME_SKIP={FRAME_SKIP}, YOLO_IMGSZ={YOLO_IMGSZ}, "
-                f"FP16={'ON' if USE_HALF else 'OFF'}, VERIFY={'ON' if has_verify else 'OFF'}"
+                f"VERIFY={'ON' if has_verify else 'OFF'}"
             )
 
             # Adaptive parameters

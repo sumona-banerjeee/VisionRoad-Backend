@@ -145,16 +145,14 @@ def setup_logging():
     root_logger.addHandler(error_handler)
 
     # ── Detection-specific loggers ───────────────────────────────────────────
-    # Updated to match the actual module structure used by the codebase.
-    # Guard with _has_handler_for_file() to survive hot-reloads.
+    # Attach to the *parent* namespace loggers so every module added under
+    # app.detectors.*, app.helpers.*, or app.services.* is automatically
+    # captured — no need to list individual files here.
     # propagate=False so entries don't also appear in visionroad.log.
-    _DETECTION_LOGGERS = [
-        "app.detectors.yolo.detector",  # primary YOLO detector
-        "app.detectors.base.base_detector",  # shared base class
-        "app.services.upload_service",  # upload + pipeline kick-off
-        "app.services.location_mapper",  # GPS coord lookup
-        "app.helpers.vl_helper",  # VL API calls (was leaking into visionroad.log)
-        "app.helpers.sam3_helper",  # SAM3 helper
+    _DETECTION_NAMESPACES = [
+        "app.detectors",   # all detectors (yolo, yoloe, base, registry…)
+        "app.helpers",     # all helpers  (vl_helper, sam3_helper, yoloe_helper…)
+        "app.services",    # all services (upload_service, location_mapper…)
     ]
 
     detection_handler = logging.handlers.RotatingFileHandler(
@@ -166,27 +164,26 @@ def setup_logging():
     detection_handler.setLevel(logging.DEBUG)
     detection_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
 
-    for logger_name in _DETECTION_LOGGERS:
-        det_logger = logging.getLogger(logger_name)
-        det_logger.setLevel(logging.DEBUG)
-        det_logger.propagate = False  # no bleed into visionroad.log
+    for ns in _DETECTION_NAMESPACES:
+        ns_logger = logging.getLogger(ns)
+        ns_logger.setLevel(logging.DEBUG)
+        ns_logger.propagate = False  # no bleed into visionroad.log
 
         # only add handler if not already attached (survives reload)
-        if not _has_handler_for_file(det_logger, DETECTION_LOG_FILE):
-            det_logger.addHandler(detection_handler)
+        if not _has_handler_for_file(ns_logger, DETECTION_LOG_FILE):
+            ns_logger.addHandler(detection_handler)
 
-        # Still forward ERRORs to the shared error.log via root propagation
-        # is disabled, so we attach the error handler directly.
-        if not _has_handler_for_file(det_logger, ERROR_LOG_FILE):
-            det_logger.addHandler(error_handler)
+        # Forward ERRORs to shared error.log (propagation is off, so attach directly)
+        if not _has_handler_for_file(ns_logger, ERROR_LOG_FILE):
+            ns_logger.addHandler(error_handler)
 
-    # In development, also stream detection logs to the console so we can
-    # monitor YOLO/VL progress in real time without tailing a file.
+    # In development, also stream detection logs to console for real-time
+    # monitoring of YOLO/VL/YOLOE progress without tailing a file.
     if os.getenv("APP_ENV", "development") != "production":
-        for logger_name in _DETECTION_LOGGERS:
-            dev_logger = logging.getLogger(logger_name)
-            if console_handler not in dev_logger.handlers:
-                dev_logger.addHandler(console_handler)
+        for ns in _DETECTION_NAMESPACES:
+            ns_logger = logging.getLogger(ns)
+            if console_handler not in ns_logger.handlers:
+                ns_logger.addHandler(console_handler)
 
     # ── Performance logger ───────────────────────────────────────────────────
     perf_handler = logging.handlers.RotatingFileHandler(

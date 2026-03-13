@@ -65,7 +65,7 @@ class BaseDetector:
                 gpu_name = torch.cuda.get_device_name(0)
                 vram = torch.cuda.get_device_properties(0).total_memory / 1e9
                 logger.info(
-                    f"Model will run on GPU: {gpu_name} ({vram:.1f} GB VRAM) — FP16 via track(half=True)"
+                    f"Model will run on GPU: {gpu_name} ({vram:.1f} GB VRAM) — FP32 (half omitted to avoid bfloat16 crash)"
                 )
             else:
                 logger.info("Model loaded on CPU (FP32)")

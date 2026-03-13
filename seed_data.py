@@ -110,11 +110,22 @@ def seed_kolkata_jaipur_highway():
     )
 
     if package1:
+        # Location 0
+        create_location(
+            package_id=package1["id"],
+            segment_name="Kolkata South Corridor",
+            start_lat=22.569,
+            start_lng=88.430,
+            end_lat=22.582,
+            end_lng=88.438,
+            chainage_start=0,
+            chainage_end=10,
+        )
         # Location 1: Dankuni-Burdwan segment
         create_location(
             package_id=package1["id"],
             segment_name="Dankuni-Burdwan (KM 0-80)",
-            chainage_start=0.0,
+            chainage_start=10,
             chainage_end=80.0,
             start_lat=22.6500,  # Dankuni area
             start_lng=88.2800,

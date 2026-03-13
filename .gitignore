@@ -37,6 +37,8 @@ visionroad.db
 models/*.onnx
 models/*.engine
 models/*.weights
+# mobileclip_blt.ts (~572 MB) — auto-downloaded by ultralytics on first run for yoloe, never commit
+**/mobileclip_blt.ts
 # *.pt
 *.onnx
 *.engine

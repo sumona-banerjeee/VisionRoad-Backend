@@ -71,12 +71,13 @@ class YoloDetector(BaseDetector):
         detection_mode: String label for the detection mode (e.g. "yolo", "yolo_vl", "sam3").
     """
 
-    def __init__(self, verify_fn=None, detection_mode="yolo", conf_threshold=CONF_THRESHOLD):
+    def __init__(self, verify_fn=None, detection_mode="yolo", conf_threshold=CONF_THRESHOLD, apply_roi=True):
         """Initialize detector with YOLO model and optional verification callback."""
         super().__init__(model_path=MODEL_PATH)
         self.verify_fn = verify_fn
         self.detection_mode = detection_mode
         self.conf_threshold = conf_threshold
+        self.apply_roi = apply_roi
 
         mode_label = f"YOLO+verify ({self.detection_mode})" if self.verify_fn else "YOLO-only"
         logger.info(f"YoloDetector ready — mode: {mode_label}")
@@ -418,11 +419,12 @@ class YoloDetector(BaseDetector):
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                         class_name = str(self.model.names[cid])
 
-                        if not (
-                            ROI_LEFT < cx < ROI_RIGHT and ROI_TOP < cy < ROI_BOTTOM
-                        ):
-                            rejection_stats["roi_outside"] += 1
-                            continue
+                        if self.apply_roi:
+                            if not (
+                                ROI_LEFT < cx < ROI_RIGHT and ROI_TOP < cy < ROI_BOTTOM
+                            ):
+                                rejection_stats["roi_outside"] += 1
+                                continue
 
                         if tid in tracker_class_lock:
                             if tracker_class_lock[tid] != class_name:

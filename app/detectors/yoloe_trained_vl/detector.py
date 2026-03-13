@@ -49,6 +49,7 @@ class YoloeTrainedVlDetector(YoloDetector):
             verify_fn=process_with_trained_vl,
             detection_mode="yoloe_trained_vl",
             conf_threshold=YOLOE_TRAINED_CONF,
+            apply_roi=False,
         )
         logger.info(
             f"YoloeTrainedVlDetector ready — model={YOLOE_TRAINED_MODEL_PATH}, "

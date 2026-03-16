@@ -30,7 +30,7 @@ def _derive_output_path(src: str) -> str:
 
 OUTPUT_PATH = _derive_output_path(INPUT_SOURCE)
 
-# ── Exactly 10 prompts — underscores removed ──
+# ── Prompts — underscores removed ──
 TARGET_PROMPTS = [
     "drain opening",
     "broken drain",
@@ -42,6 +42,17 @@ TARGET_PROMPTS = [
     "pothole",
     "cracked pavement",
     "garbage blockage",
+    
+    # ── Upright pole prompts ──
+    "straight vertical traffic sign pole",
+    "upright traffic sign on straight pole",
+    "traffic sign on vertical metal post",
+    
+    # ── Bent pole prompts ──
+    "tilted traffic sign pole",
+    "bent signpost",
+    "leaning traffic sign pole",
+    "crooked road sign pole",
 ]
 
 PROMPTS = TARGET_PROMPTS
@@ -62,6 +73,17 @@ CLASS_COLOURS = [
     (100,   0, 255),   # 7 — pothole               → Pink
     (0,   200, 100),   # 8 — cracked pavement      → Green
     (30,  100, 180),   # 9 — garbage blockage      → Brown
+    
+    # Upright pole colours (Silvers / Grays)
+    (200, 200, 200),   # 10 — straight vertical traffic sign pole    → Light Gray
+    (150, 150, 150),   # 11 — upright traffic sign on straight pole  → Gray
+    (100, 100, 100),   # 12 — traffic sign on vertical metal post    → Dark Gray
+    
+    # Bent pole colours (Reds / Oranges / Purples)
+    (0,   128, 255),   # 13 — tilted traffic sign pole               → Deep Orange
+    (0,     0, 150),   # 14 — bent signpost                          → Dark Red
+    (128,   0, 128),   # 15 — leaning traffic sign pole              → Purple
+    (0,   150, 150),   # 16 — crooked road sign pole                 → Dark Yellow
 ]
 
 

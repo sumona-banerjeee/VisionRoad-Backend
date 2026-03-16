@@ -2,10 +2,10 @@
 YOLOE Helper — Open-vocabulary detection with text prompts.
 
 Encapsulates all YOLOE-specific logic:
-  • 49 text prompts across sign + pothole categories
-  • Dual confidence thresholds (signboard=0.65, pothole=0.10)
+  • 56 text prompts across sign + pothole + drain categories
+  • Triple confidence thresholds (signboard=0.65, pothole=0.10, drain=0.10)
   • 5 post-detection filters for pothole FP removal
-  • Display label mapping (Defective Signboard / Pothole)
+  • Display label mapping (Defective Signboard / Pothole / Drain Issue)
   • YOLOE model loading (lazy singleton)
   • Per-frame inference with full filter pipeline
 
@@ -15,7 +15,7 @@ the detector owns the video loop, progress, GPS, DB etc.
 Return contract for process_frame_with_yoloe():
     [
         {
-            "class_name":  str,    # backend name ("defected_sign_board" / "pothole")
+            "class_name":  str,    # backend name ("defected_sign_board" / "pothole" / "drain_issue")
             "prompt_name": str,    # original YOLOE prompt
             "confidence":  float,
             "bbox":        tuple,  # (x1, y1, x2, y2)
@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 # ── YOLOE Configuration ──────────────────────────────────────────────────────
 YOLOE_MODEL_WEIGHTS = "models/yoloe-11m-seg.pt"
 YOLOE_CONF_SIGNBOARD = 0.65   # confidence threshold for signboard detections
-YOLOE_CONF_POTHOLE = 0.10     # confidence threshold for pothole detections
+YOLOE_CONF_POTHOLE   = 0.10   # confidence threshold for pothole detections
+YOLOE_CONF_DRAIN     = 0.10   # confidence threshold for drain/water issue detections
 # Minimum conf used for model.predict() — post-filtering applies per-category
 YOLOE_CONF_THRESHOLD = YOLOE_CONF_POTHOLE
 
@@ -118,6 +119,26 @@ TARGET_PROMPTS = [
     # ── Multiple / severe ──
     "multiple potholes on road surface",
     "pothole with rough sandy interior texture",
+
+    # ── Upright pole prompts ──
+    "straight vertical traffic sign pole",
+    "upright traffic sign on straight pole",
+    "traffic sign on vertical metal post",
+
+    # ── Bent pole prompts ──
+    "tilted traffic sign pole",
+    "bent signpost",
+    "leaning traffic sign pole",
+    "crooked road sign pole",
+
+    # ── Drain / water issue prompts ──
+    "drain opening",
+    "broken drain",
+    "missing drain cover",
+    "clogged drain",
+    "overflowing drain",
+    "water clogging",
+    "garbage blockage",
 ]
 
 PROMPTS = TARGET_PROMPTS
@@ -142,6 +163,9 @@ _GOOD_SIGN_PROMPTS = {
     "large outdoor advertising billboard",
     "commercial hoarding on metal frame",
     "branded advertisement hoarding",
+    "straight vertical traffic sign pole",
+    "upright traffic sign on straight pole",
+    "traffic sign on vertical metal post",
 }
 
 # ── All other sign prompts → "defected_sign_board" ───────────────────────────
@@ -173,6 +197,21 @@ _DEFECTIVE_SIGN_PROMPTS = {
     "graffiti covered traffic sign",
     "cracked traffic signboard",
     "weathered signboard with peeling paint",
+    "tilted traffic sign pole",
+    "bent signpost",
+    "leaning traffic sign pole",
+    "crooked road sign pole",
+}
+
+# ── Drain / water issue prompts → "drain_issue" ────────────────────────
+_DRAIN_PROMPTS = {
+    "drain opening",
+    "broken drain",
+    "missing drain cover",
+    "clogged drain",
+    "overflowing drain",
+    "water clogging",
+    "garbage blockage",
 }
 
 
@@ -182,6 +221,8 @@ def get_display_label(prompt_name: str) -> str | None:
         return "defected_sign_board"
     if prompt_name in ACCEPTED_POTHOLE_PROMPTS:
         return "pothole"
+    if prompt_name in _DRAIN_PROMPTS:
+        return "drain_issue"
     return None  # skip good signs and non-accepted pothole prompts
 
 
@@ -189,6 +230,8 @@ def get_conf_threshold(prompt_name: str) -> float:
     """Return the correct confidence threshold for this prompt."""
     if prompt_name in _DEFECTIVE_SIGN_PROMPTS:
         return YOLOE_CONF_SIGNBOARD
+    if prompt_name in _DRAIN_PROMPTS:
+        return YOLOE_CONF_DRAIN
     return YOLOE_CONF_POTHOLE
 
 
@@ -196,6 +239,7 @@ def get_conf_threshold(prompt_name: str) -> float:
 ROAD_DAMAGE_CLASSES = {
     "defected_sign_board",
     "pothole",
+    "drain_issue",
 }
 ALL_CLASSES = ROAD_DAMAGE_CLASSES
 

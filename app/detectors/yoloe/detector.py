@@ -45,6 +45,7 @@ from app.helpers.yoloe_helper import (
     YOLOE_CONF_THRESHOLD,
     YOLOE_CONF_SIGNBOARD,
     YOLOE_CONF_POTHOLE,
+    YOLOE_CONF_DRAIN,
     NUM_TARGET_CLASSES,
 )
 
@@ -175,7 +176,8 @@ class YoloeDetector(BaseDetector):
             logger.info(
                 f"YOLOE settings: FRAME_SKIP={FRAME_SKIP}, IMGSZ={YOLOE_IMGSZ}, "
                 f"TRACKER={TRACKER}, "
-                f"CONF_SIGN={YOLOE_CONF_SIGNBOARD}, CONF_POT={YOLOE_CONF_POTHOLE}"
+                f"CONF_SIGN={YOLOE_CONF_SIGNBOARD}, CONF_POT={YOLOE_CONF_POTHOLE}, "
+                f"CONF_DRAIN={YOLOE_CONF_DRAIN}"
             )
 
             # Adaptive parameters (same as YoloDetector)
@@ -420,6 +422,9 @@ class YoloeDetector(BaseDetector):
                                         "pothole": len(
                                             counted_ids.get("pothole", set())
                                         ),
+                                        "drain_issue": len(
+                                            counted_ids.get("drain_issue", set())
+                                        ),
                                         "road_crack": 0,
                                         "damaged_road_marking": 0,
                                         "good_sign_board": 0,
@@ -451,6 +456,9 @@ class YoloeDetector(BaseDetector):
                             "unique_defected_sign_board": len(
                                 counted_ids.get("defected_sign_board", set())
                             ),
+                            "unique_drain_issue": len(
+                                counted_ids.get("drain_issue", set())
+                            ),
                             "unique_road_crack": 0,
                             "unique_damaged_road_marking": 0,
                             "unique_good_sign_board": 0,
@@ -473,6 +481,9 @@ class YoloeDetector(BaseDetector):
             )
             pothole_list = self._get_class_list(
                 confirmed, "pothole", gps_points, perf_timings
+            )
+            drain_issue_list = self._get_class_list(
+                confirmed, "drain_issue", gps_points, perf_timings
             )
 
             frames_with_detections = _frames_written
@@ -508,6 +519,9 @@ class YoloeDetector(BaseDetector):
                     "unique_pothole": len(
                         counted_ids.get("pothole", set())
                     ),
+                    "unique_drain_issue": len(
+                        counted_ids.get("drain_issue", set())
+                    ),
                     "unique_road_crack": 0,
                     "unique_damaged_road_marking": 0,
                     "unique_good_sign_board": 0,
@@ -535,6 +549,7 @@ class YoloeDetector(BaseDetector):
                 "vl_stats": None,
                 "defected_sign_board_list": defected_sign_board_list,
                 "pothole_list": pothole_list,
+                "drain_issue_list": drain_issue_list,
                 "road_crack_list": [],
                 "damaged_road_marking_list": [],
                 "good_sign_board_list": [],
@@ -547,7 +562,7 @@ class YoloeDetector(BaseDetector):
 
             # Save to DB
             all_detections_flat = (
-                defected_sign_board_list + pothole_list
+                defected_sign_board_list + pothole_list + drain_issue_list
             )
             self._save_to_db(video_id, all_detections_flat, perf_timings)
 

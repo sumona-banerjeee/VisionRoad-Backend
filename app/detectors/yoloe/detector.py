@@ -27,6 +27,8 @@ import tempfile
 from datetime import datetime
 from collections import defaultdict, deque
 
+import numpy as np
+
 from app.detectors.base.base_detector import BaseDetector, executor
 from app.ws.websocket_manager import manager
 from app.core.config import processing_status, detection_results, RESULTS_DIR
@@ -39,6 +41,7 @@ from app.helpers.yoloe_helper import (
     load_yoloe_model,
     get_display_label,
     get_conf_threshold,
+    check_signboard_pole_tilt,
     _run_pothole_filters,
     ROAD_DAMAGE_CLASSES,
     ALL_CLASSES,
@@ -310,8 +313,13 @@ class YoloeDetector(BaseDetector):
                     confidences = results[0].boxes.conf.cpu().numpy()
                     names = results[0].names
 
-                    for tid, cls_id, box, conf in zip(
-                        track_ids, class_ids, boxes, confidences
+                    # Extract segmentation masks for pole tilt analysis
+                    masks_data = None
+                    if results[0].masks is not None:
+                        masks_data = results[0].masks.data.cpu().numpy()
+
+                    for idx, (tid, cls_id, box, conf) in enumerate(
+                        zip(track_ids, class_ids, boxes, confidences)
                     ):
                         tid, cls_id = int(tid), int(cls_id)
                         x1, y1, x2, y2 = map(int, box)
@@ -398,6 +406,23 @@ class YoloeDetector(BaseDetector):
                                     x1, y1, x2, y2,
                                     cx, cy,
                                 )
+                                # ── Pole tilt for confirmed signboards ─────
+                                if backend_class == "defected_sign_board":
+                                    seg_mask = None
+                                    if masks_data is not None and idx < len(masks_data):
+                                        mask_raw = masks_data[idx]
+                                        fh, fw = frame.shape[:2]
+                                        if mask_raw.shape[:2] != (fh, fw):
+                                            mask_raw = cv2.resize(
+                                                mask_raw, (fw, fh),
+                                                interpolation=cv2.INTER_NEAREST,
+                                            )
+                                        seg_mask = (mask_raw > 0.5).astype(np.uint8)
+                                    tilt_angle, pole_status = check_signboard_pole_tilt(
+                                        frame, (x1, y1, x2, y2), seg_mask
+                                    )
+                                    confirmed[tid]["pole_tilt_angle"] = round(tilt_angle, 1)
+                                    confirmed[tid]["pole_status"] = pole_status
                             else:
                                 rejection_stats["spatial_duplicate"] += 1
                         elif tid not in confirmed:
@@ -406,32 +431,35 @@ class YoloeDetector(BaseDetector):
                         # ── Append to frame data if confirmed ─────────────────
                         if tid in confirmed:
                             total_detections_count += 1
-                            frame_data["detections"].append(
-                                {
-                                    "frame_id": frame_count,
-                                    "detection_id": tid,
-                                    "type": backend_class,
-                                    "prompt_name": prompt_name,
-                                    "confidence": round(float(conf), 3),
-                                    "count": {
-                                        "defected_sign_board": len(
-                                            counted_ids.get("defected_sign_board", set())
-                                        ),
-                                        "pothole": len(
-                                            counted_ids.get("pothole", set())
-                                        ),
-                                        "road_crack": 0,
-                                        "damaged_road_marking": 0,
-                                        "good_sign_board": 0,
-                                    },
-                                    "bbox": {
-                                        "x1": x1, "y1": y1,
-                                        "x2": x2, "y2": y2,
-                                    },
-                                    "center": {"x": cx, "y": cy},
-                                    "area": (x2 - x1) * (y2 - y1),
-                                }
-                            )
+                            det_entry = {
+                                "frame_id": frame_count,
+                                "detection_id": tid,
+                                "type": backend_class,
+                                "prompt_name": prompt_name,
+                                "confidence": round(float(conf), 3),
+                                "count": {
+                                    "defected_sign_board": len(
+                                        counted_ids.get("defected_sign_board", set())
+                                    ),
+                                    "pothole": len(
+                                        counted_ids.get("pothole", set())
+                                    ),
+                                    "road_crack": 0,
+                                    "damaged_road_marking": 0,
+                                    "good_sign_board": 0,
+                                },
+                                "bbox": {
+                                    "x1": x1, "y1": y1,
+                                    "x2": x2, "y2": y2,
+                                },
+                                "center": {"x": cx, "y": cy},
+                                "area": (x2 - x1) * (y2 - y1),
+                            }
+                            # Include pole tilt data for signboards
+                            if "pole_tilt_angle" in confirmed[tid]:
+                                det_entry["pole_tilt_angle"] = confirmed[tid]["pole_tilt_angle"]
+                                det_entry["pole_status"] = confirmed[tid]["pole_status"]
+                            frame_data["detections"].append(det_entry)
 
                 if frame_data["detections"]:
                     _ndjson_fd.write(json.dumps(frame_data) + "\n")
@@ -680,6 +708,10 @@ class YoloeDetector(BaseDetector):
                     "vl_confidence": info.get("vl_confidence"),
                     "vl_category": info.get("vl_category"),
                 }
+                # Include pole tilt data for signboard detections
+                if "pole_tilt_angle" in info:
+                    det_data["pole_tilt_angle"] = info["pole_tilt_angle"]
+                    det_data["pole_status"] = info["pole_status"]
                 if gps_points:
                     _t0 = time.perf_counter()
                     gps_coords = self.find_nearest_gps(

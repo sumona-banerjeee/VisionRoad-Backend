@@ -51,7 +51,8 @@ results/
 Test/video/
 Test/output/
 Test/image/
-
+Test/drain_data/
+Test/img/
 # ====================
 # Alembic Migration Versions
 # ====================

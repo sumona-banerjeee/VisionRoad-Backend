@@ -11,8 +11,24 @@ from ultralytics import YOLOE
 
 MODEL_WEIGHTS = r"models\yoloe-11m-seg.pt"
 
+VIDEO_EXTENSIONS = (".mp4", ".avi", ".mkv", ".mov", ".wmv", ".webm", ".flv", ".m4v")
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp")
+
 INPUT_SOURCE = r"Test\drain_data\img\img4.png"
-OUTPUT_PATH  = r"Test\drain_data\output\img4_output.png"
+
+def _derive_output_path(src: str) -> str:
+    """Auto-build output path from the input filename.
+    - Images  → same stem + original extension  (e.g. img4_output.png)
+    - Videos  → same stem + .mp4                (writer uses mp4v codec)
+    - Webcam  → 'webcam_output.mp4'
+    """
+    if src == "0":
+        return r"Test\drain_data\output\webcam_output.mp4"
+    stem, ext = os.path.splitext(os.path.basename(src))
+    out_ext = ext.lower() if ext.lower() in IMAGE_EXTENSIONS else ".mp4"
+    return os.path.join(r"Test\drain_data\output", f"{stem}_output{out_ext}")
+
+OUTPUT_PATH = _derive_output_path(INPUT_SOURCE)
 
 # ── Exactly 10 prompts — underscores removed ──
 TARGET_PROMPTS = [
@@ -33,8 +49,6 @@ NUM_TARGET_CLASSES = len(TARGET_PROMPTS)
 
 CONFIDENCE_THRESHOLD = 0.02
 
-VIDEO_EXTENSIONS = (".mp4", ".avi", ".mkv", ".mov", ".wmv", ".webm", ".flv", ".m4v")
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp")
 
 # ── One distinct colour per class (BGR) ──
 CLASS_COLOURS = [
@@ -276,8 +290,8 @@ def main():
         help=f"Confidence threshold (default: {CONFIDENCE_THRESHOLD})",
     )
     parser.add_argument(
-        "--save", default=OUTPUT_PATH,
-        help=f"Path to save annotated output (default: {OUTPUT_PATH})",
+        "--save", default=None,
+        help="Path to save annotated output (auto-derived from source name if omitted)",
     )
     parser.add_argument(
         "--no-show", action="store_true",
@@ -293,17 +307,21 @@ def main():
     source = args.source
     ext    = os.path.splitext(source)[1].lower()
 
+    # Derive save path from the ACTUAL runtime source (not the hardcoded default)
+    save_path = args.save if args.save else _derive_output_path(source)
+    print(f"[INFO] Output will be saved to: {save_path}")
+
     if source == "0" or ext in VIDEO_EXTENSIONS:
         print("[INFO] Detected source type: VIDEO")
         detect_video(
             model, source,
-            save_path=args.save,
+            save_path=save_path,
             show=not args.no_show,
             print_interval=args.print_interval,
         )
     elif ext in IMAGE_EXTENSIONS:
         print("[INFO] Detected source type: IMAGE")
-        detect_image(model, source, save_path=args.save)
+        detect_image(model, source, save_path=save_path)
     else:
         print(f"[ERROR] Unsupported file format: '{ext}'")
         print(f"  Supported images : {', '.join(IMAGE_EXTENSIONS)}")

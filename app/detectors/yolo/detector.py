@@ -28,6 +28,7 @@ from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
 from app.db.crud_hierarchy import find_chainage_by_gps
+from app.detectors.yolo.pole_tilt import analyze_pole_tilt
 
 logger = logging.getLogger(__name__)
 
@@ -529,6 +530,14 @@ class YoloDetector(BaseDetector):
                                     cy,
                                 )
 
+                                # ── Pole tilt for confirmed signboards ─────
+                                if class_name == "defected_sign_board":
+                                    tilt_angle, pole_status = analyze_pole_tilt(
+                                        frame, (x1, y1, x2, y2)
+                                    )
+                                    confirmed[tid]["pole_tilt_angle"] = round(tilt_angle, 1)
+                                    confirmed[tid]["pole_status"] = pole_status
+
                                 # Submit async verification if callback is provided
                                 if (
                                     has_verify
@@ -557,30 +566,33 @@ class YoloDetector(BaseDetector):
                         if tid in confirmed:
                             # Bug 2 fix: no per-frame count increment here;
                             # total_detections_count is recomputed after post-drain filter.
-                            frame_data["detections"].append(
-                                {
-                                    "frame_id": frame_count,
-                                    "detection_id": tid,
-                                    "type": class_name,
-                                    "confidence": round(float(conf), 3),
-                                    "count": {
-                                        "defected_sign_board": len(
-                                            counted_ids["defected_sign_board"]
-                                        ),
-                                        "pothole": len(counted_ids["pothole"]),
-                                        "road_crack": len(counted_ids["road_crack"]),
-                                        "damaged_road_marking": len(
-                                            counted_ids["damaged_road_marking"]
-                                        ),
-                                        "good_sign_board": len(
-                                            counted_ids["good_sign_board"]
-                                        ),
-                                    },
-                                    "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                                    "center": {"x": cx, "y": cy},
-                                    "area": (x2 - x1) * (y2 - y1),
-                                }
-                            )
+                            det_entry = {
+                                "frame_id": frame_count,
+                                "detection_id": tid,
+                                "type": class_name,
+                                "confidence": round(float(conf), 3),
+                                "count": {
+                                    "defected_sign_board": len(
+                                        counted_ids["defected_sign_board"]
+                                    ),
+                                    "pothole": len(counted_ids["pothole"]),
+                                    "road_crack": len(counted_ids["road_crack"]),
+                                    "damaged_road_marking": len(
+                                        counted_ids["damaged_road_marking"]
+                                    ),
+                                    "good_sign_board": len(
+                                        counted_ids["good_sign_board"]
+                                    ),
+                                },
+                                "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                                "center": {"x": cx, "y": cy},
+                                "area": (x2 - x1) * (y2 - y1),
+                            }
+                            # Include pole tilt data for signboards
+                            if "pole_tilt_angle" in confirmed[tid]:
+                                det_entry["pole_tilt_angle"] = confirmed[tid]["pole_tilt_angle"]
+                                det_entry["pole_status"] = confirmed[tid]["pole_status"]
+                            frame_data["detections"].append(det_entry)
 
                 # Bug 1 fix: buffer instead of writing directly to NDJSON.
                 # Actual write happens after the VL/SAM3 drain (see post-drain block).
@@ -901,6 +913,10 @@ class YoloDetector(BaseDetector):
                     "vl_confidence": info.get("vl_confidence"),
                     "vl_category": info.get("vl_category"),
                 }
+                # Include pole tilt data for signboard detections
+                if "pole_tilt_angle" in info:
+                    det_data["pole_tilt_angle"] = info["pole_tilt_angle"]
+                    det_data["pole_status"] = info["pole_status"]
                 if gps_points:
                     _t0 = time.perf_counter()
                     gps_coords = self.find_nearest_gps(

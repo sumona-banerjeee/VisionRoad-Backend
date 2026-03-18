@@ -27,6 +27,8 @@ import tempfile
 from datetime import datetime
 from collections import defaultdict, deque
 
+import numpy as np
+
 from app.detectors.base.base_detector import BaseDetector, executor
 from app.ws.websocket_manager import manager
 from app.core.config import processing_status, detection_results, RESULTS_DIR
@@ -34,11 +36,12 @@ from app.core.logging_config import PerfTimer, perf_logger
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
-from app.db.crud_hierarchy import find_chainage_by_gps
+from app.db.crud_hierarchy import find_location_by_gps
 from app.helpers.yoloe_helper import (
     load_yoloe_model,
     get_display_label,
     get_conf_threshold,
+    check_signboard_pole_tilt,
     _run_pothole_filters,
     ROAD_DAMAGE_CLASSES,
     ALL_CLASSES,
@@ -310,8 +313,13 @@ class YoloeDetector(BaseDetector):
                     confidences = results[0].boxes.conf.cpu().numpy()
                     names = results[0].names
 
-                    for tid, cls_id, box, conf in zip(
-                        track_ids, class_ids, boxes, confidences
+                    # Extract segmentation masks for pole tilt analysis
+                    masks_data = None
+                    if results[0].masks is not None:
+                        masks_data = results[0].masks.data.cpu().numpy()
+
+                    for idx, (tid, cls_id, box, conf) in enumerate(
+                        zip(track_ids, class_ids, boxes, confidences)
                     ):
                         tid, cls_id = int(tid), int(cls_id)
                         x1, y1, x2, y2 = map(int, box)
@@ -398,6 +406,23 @@ class YoloeDetector(BaseDetector):
                                     x1, y1, x2, y2,
                                     cx, cy,
                                 )
+                                # ── Pole tilt for confirmed signboards ─────
+                                if backend_class == "defected_sign_board":
+                                    seg_mask = None
+                                    if masks_data is not None and idx < len(masks_data):
+                                        mask_raw = masks_data[idx]
+                                        fh, fw = frame.shape[:2]
+                                        if mask_raw.shape[:2] != (fh, fw):
+                                            mask_raw = cv2.resize(
+                                                mask_raw, (fw, fh),
+                                                interpolation=cv2.INTER_NEAREST,
+                                            )
+                                        seg_mask = (mask_raw > 0.5).astype(np.uint8)
+                                    tilt_angle, pole_status = check_signboard_pole_tilt(
+                                        frame, (x1, y1, x2, y2), seg_mask
+                                    )
+                                    confirmed[tid]["pole_tilt_angle"] = round(tilt_angle, 1)
+                                    confirmed[tid]["pole_status"] = pole_status
                             else:
                                 rejection_stats["spatial_duplicate"] += 1
                         elif tid not in confirmed:
@@ -406,32 +431,35 @@ class YoloeDetector(BaseDetector):
                         # ── Append to frame data if confirmed ─────────────────
                         if tid in confirmed:
                             total_detections_count += 1
-                            frame_data["detections"].append(
-                                {
-                                    "frame_id": frame_count,
-                                    "detection_id": tid,
-                                    "type": backend_class,
-                                    "prompt_name": prompt_name,
-                                    "confidence": round(float(conf), 3),
-                                    "count": {
-                                        "defected_sign_board": len(
-                                            counted_ids.get("defected_sign_board", set())
-                                        ),
-                                        "pothole": len(
-                                            counted_ids.get("pothole", set())
-                                        ),
-                                        "road_crack": 0,
-                                        "damaged_road_marking": 0,
-                                        "good_sign_board": 0,
-                                    },
-                                    "bbox": {
-                                        "x1": x1, "y1": y1,
-                                        "x2": x2, "y2": y2,
-                                    },
-                                    "center": {"x": cx, "y": cy},
-                                    "area": (x2 - x1) * (y2 - y1),
-                                }
-                            )
+                            det_entry = {
+                                "frame_id": frame_count,
+                                "detection_id": tid,
+                                "type": backend_class,
+                                "prompt_name": prompt_name,
+                                "confidence": round(float(conf), 3),
+                                "count": {
+                                    "defected_sign_board": len(
+                                        counted_ids.get("defected_sign_board", set())
+                                    ),
+                                    "pothole": len(
+                                        counted_ids.get("pothole", set())
+                                    ),
+                                    "road_crack": 0,
+                                    "damaged_road_marking": 0,
+                                    "good_sign_board": 0,
+                                },
+                                "bbox": {
+                                    "x1": x1, "y1": y1,
+                                    "x2": x2, "y2": y2,
+                                },
+                                "center": {"x": cx, "y": cy},
+                                "area": (x2 - x1) * (y2 - y1),
+                            }
+                            # Include pole tilt data for signboards
+                            if "pole_tilt_angle" in confirmed[tid]:
+                                det_entry["pole_tilt_angle"] = confirmed[tid]["pole_tilt_angle"]
+                                det_entry["pole_status"] = confirmed[tid]["pole_status"]
+                            frame_data["detections"].append(det_entry)
 
                 if frame_data["detections"]:
                     _ndjson_fd.write(json.dumps(frame_data) + "\n")
@@ -680,6 +708,10 @@ class YoloeDetector(BaseDetector):
                     "vl_confidence": info.get("vl_confidence"),
                     "vl_category": info.get("vl_category"),
                 }
+                # Include pole tilt data for signboard detections
+                if "pole_tilt_angle" in info:
+                    det_data["pole_tilt_angle"] = info["pole_tilt_angle"]
+                    det_data["pole_status"] = info["pole_status"]
                 if gps_points:
                     _t0 = time.perf_counter()
                     gps_coords = self.find_nearest_gps(
@@ -700,10 +732,10 @@ class YoloeDetector(BaseDetector):
             db_detections = []
             for det in all_detections:
                 lat, lng = det.get("lat"), det.get("lng")
-                project_id, package_id, chainage_id = None, None, None
+                project_id, package_id, location_id = None, None, None
                 if lat and lng:
                     _t0 = time.perf_counter()
-                    chainage = find_chainage_by_gps(db, lat, lng)
+                    location = find_location_by_gps(db, lat, lng)
                     _gps_db_elapsed = time.perf_counter() - _t0
                     if perf_timings is not None:
                         perf_timings["db_gps_match"]["total"] += _gps_db_elapsed
@@ -711,13 +743,13 @@ class YoloeDetector(BaseDetector):
                     perf_logger.info(
                         f"[{video_id}] DB GPS match | {_gps_db_elapsed:.4f}s"
                         f" | lat={lat:.5f} lng={lng:.5f}"
-                        f" | {'HIT' if chainage else 'MISS'}"
+                        f" | {'HIT' if location else 'MISS'}"
                     )
-                    if chainage:
-                        chainage_id = chainage.id
-                        package_id = chainage.package_id
-                        if chainage.package:
-                            project_id = chainage.package.project_id
+                    if location:
+                        location_id = location.id
+                        package_id = location.package_id
+                        if location.package:
+                            project_id = location.package.project_id
 
                 db_det = Detection(
                     video_id=video_id,
@@ -730,7 +762,7 @@ class YoloeDetector(BaseDetector):
                     longitude=lng,
                     project_id=project_id,
                     package_id=package_id,
-                    chainage_id=chainage_id,
+                    location_id=location_id,
                 )
                 db_det.set_bounding_box(det.get("bbox", {}))
                 db_detections.append(db_det)

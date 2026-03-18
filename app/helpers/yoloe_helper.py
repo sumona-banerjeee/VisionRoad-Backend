@@ -8,6 +8,7 @@ Encapsulates all YOLOE-specific logic:
   • Display label mapping (Defective Signboard / Pothole)
   • YOLOE model loading (lazy singleton)
   • Per-frame inference with full filter pipeline
+  • Pole tilt analysis for signboard detections
 
 Called by YoloeDetector — this helper owns the model, prompts, and inference;
 the detector owns the video loop, progress, GPS, DB etc.
@@ -192,6 +193,32 @@ def get_conf_threshold(prompt_name: str) -> float:
     return YOLOE_CONF_POTHOLE
 
 
+def check_signboard_pole_tilt(
+    frame,
+    box: tuple,
+    mask=None,
+) -> tuple[float, str]:
+    """
+    Analyze pole tilt for a detected signboard.
+
+    Convenience wrapper that delegates to the pole_tilt module.
+    Call this when backend_class == "defected_sign_board" to determine
+    whether the pole is upright or bent.
+
+    Args:
+        frame: BGR video frame.
+        box:   Bounding box (x1, y1, x2, y2).
+        mask:  Optional binary segmentation mask (same size as frame).
+
+    Returns:
+        (tilt_angle, classification):
+            tilt_angle:     float — degrees from vertical (0 = upright)
+            classification: "GOOD SIGNBOARD" or "BENT POLE"
+    """
+    from app.detectors.yoloe.pole_tilt import analyze_pole_tilt
+    return analyze_pole_tilt(frame, box, mask)
+
+
 # Backend road-damage classes (same as YoloDetector)
 ROAD_DAMAGE_CLASSES = {
     "defected_sign_board",
@@ -369,7 +396,14 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
         class_ids = r.boxes.cls.cpu().numpy().astype(int)
         names = r.names  # dict {class_id: class_name}
 
-        for box, conf, cls_id in zip(boxes, confs, class_ids):
+        # Extract segmentation masks if available
+        masks_data = None
+        if r.masks is not None:
+            masks_data = r.masks.data.cpu().numpy()  # (N, H, W)
+
+        for idx, (box, conf, cls_id) in enumerate(
+            zip(boxes, confs, class_ids)
+        ):
             # Filter 1: skip anything outside target classes
             if cls_id >= NUM_TARGET_CLASSES:
                 continue
@@ -398,12 +432,34 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
 
             cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-            detections.append({
+            det = {
                 "class_name": backend_class,
                 "prompt_name": prompt_name,
                 "confidence": round(float(conf), 3),
                 "bbox": (x1, y1, x2, y2),
                 "center": (cx, cy),
-            })
+            }
+
+            # ── Pole tilt analysis for signboard detections ────────────
+            if backend_class == "defected_sign_board":
+                seg_mask = None
+                if masks_data is not None and idx < len(masks_data):
+                    # Resize mask to frame dimensions if needed
+                    mask_raw = masks_data[idx]
+                    fh, fw = frame.shape[:2]
+                    if mask_raw.shape[:2] != (fh, fw):
+                        mask_raw = cv2.resize(
+                            mask_raw, (fw, fh),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                    seg_mask = (mask_raw > 0.5).astype(np.uint8)
+
+                tilt_angle, pole_status = check_signboard_pole_tilt(
+                    frame, (x1, y1, x2, y2), seg_mask
+                )
+                det["pole_tilt_angle"] = round(tilt_angle, 1)
+                det["pole_status"] = pole_status
+
+            detections.append(det)
 
     return detections

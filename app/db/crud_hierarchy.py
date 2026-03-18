@@ -55,6 +55,11 @@ def list_projects(db: Session, skip: int = 0, limit: int = 100) -> List[Project]
     )
 
 
+def count_projects(db: Session) -> int:
+    """Get total number of projects"""
+    return db.query(Project).count()
+
+
 def update_project(db: Session, project_id: str, **kwargs) -> Optional[Project]:
     """Update project fields"""
     project = get_project(db, project_id)
@@ -106,6 +111,14 @@ def list_packages(
     if project_id:
         query = query.filter(Package.project_id == project_id)
     return query.order_by(desc(Package.created_at)).offset(skip).limit(limit).all()
+
+
+def count_packages(db: Session, project_id: Optional[str] = None) -> int:
+    """Get total number of packages, optionally filtered by project"""
+    query = db.query(Package)
+    if project_id:
+        query = query.filter(Package.project_id == project_id)
+    return query.count()
 
 
 def update_package(db: Session, package_id: str, **kwargs) -> Optional[Package]:
@@ -175,6 +188,14 @@ def list_locations(
     if package_id:
         query = query.filter(Location.package_id == package_id)
     return query.order_by(desc(Location.created_at)).offset(skip).limit(limit).all()
+
+
+def count_locations(db: Session, package_id: Optional[str] = None) -> int:
+    """Get total number of locations, optionally filtered by package"""
+    query = db.query(Location)
+    if package_id:
+        query = query.filter(Location.package_id == package_id)
+    return query.count()
 
 
 def update_location(db: Session, location_id: str, **kwargs) -> Optional[Location]:

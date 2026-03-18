@@ -51,6 +51,11 @@ class LocationResponse(BaseModel):
         from_attributes = True
 
 
+class PaginatedLocationResponse(BaseModel):
+    items: List[LocationResponse]
+    totalItems: int
+
+
 # Routes
 @router.post("/", response_model=LocationResponse, status_code=201)
 async def create_location(location: LocationCreate, db: Session = Depends(get_db)):
@@ -95,33 +100,37 @@ async def create_location(location: LocationCreate, db: Session = Depends(get_db
     )
 
 
-@router.get("/", response_model=List[LocationResponse])
+@router.get("/", response_model=PaginatedLocationResponse)
 async def list_locations(
     package_id: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
 ):
-    """List all locations, optionally filtered by package"""
+    """List all locations with total count for pagination, optionally filtered by package"""
     locations = crud_hierarchy.list_locations(
         db, package_id=package_id, skip=skip, limit=limit
     )
-    return [
-        LocationResponse(
-            id=loc.id,
-            package_id=loc.package_id,
-            segment_name=loc.segment_name,
-            chainage_start_km=loc.chainage_start_km,
-            chainage_end_km=loc.chainage_end_km,
-            start_lat=loc.start_lat,
-            start_lng=loc.start_lng,
-            end_lat=loc.end_lat,
-            end_lng=loc.end_lng,
-            created_at=loc.created_at.isoformat(),
-            updated_at=loc.updated_at.isoformat(),
-        )
-        for loc in locations
-    ]
+    total = crud_hierarchy.count_locations(db, package_id=package_id)
+    return PaginatedLocationResponse(
+        items=[
+            LocationResponse(
+                id=loc.id,
+                package_id=loc.package_id,
+                segment_name=loc.segment_name,
+                chainage_start_km=loc.chainage_start_km,
+                chainage_end_km=loc.chainage_end_km,
+                start_lat=loc.start_lat,
+                start_lng=loc.start_lng,
+                end_lat=loc.end_lat,
+                end_lng=loc.end_lng,
+                created_at=loc.created_at.isoformat(),
+                updated_at=loc.updated_at.isoformat(),
+            )
+            for loc in locations
+        ],
+        totalItems=total,
+    )
 
 
 @router.get("/{location_id}", response_model=LocationResponse)

@@ -35,6 +35,11 @@ class PackageResponse(BaseModel):
         from_attributes = True
 
 
+class PaginatedPackageResponse(BaseModel):
+    items: List[PackageResponse]
+    totalItems: int
+
+
 # Routes
 @router.post("/", response_model=PackageResponse, status_code=201)
 async def create_package(package: PackageCreate, db: Session = Depends(get_db)):
@@ -57,28 +62,32 @@ async def create_package(package: PackageCreate, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/", response_model=List[PackageResponse])
+@router.get("/", response_model=PaginatedPackageResponse)
 async def list_packages(
     project_id: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
 ):
-    """List all packages, optionally filtered by project"""
+    """List all packages with total count for pagination, optionally filtered by project"""
     packages = crud_hierarchy.list_packages(
         db, project_id=project_id, skip=skip, limit=limit
     )
-    return [
-        PackageResponse(
-            id=p.id,
-            project_id=p.project_id,
-            name=p.name,
-            region=p.region,
-            created_at=p.created_at.isoformat(),
-            updated_at=p.updated_at.isoformat(),
-        )
-        for p in packages
-    ]
+    total = crud_hierarchy.count_packages(db, project_id=project_id)
+    return PaginatedPackageResponse(
+        items=[
+            PackageResponse(
+                id=p.id,
+                project_id=p.project_id,
+                name=p.name,
+                region=p.region,
+                created_at=p.created_at.isoformat(),
+                updated_at=p.updated_at.isoformat(),
+            )
+            for p in packages
+        ],
+        totalItems=total,
+    )
 
 
 @router.get("/{package_id}", response_model=PackageResponse)

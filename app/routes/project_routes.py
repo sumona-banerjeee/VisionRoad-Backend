@@ -48,6 +48,11 @@ class ProjectResponse(BaseModel):
         from_attributes = True
 
 
+class PaginatedProjectResponse(BaseModel):
+    items: List[ProjectResponse]
+    totalItems: int
+
+
 # Routes
 @router.post("/", response_model=ProjectResponse, status_code=201)
 async def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
@@ -76,25 +81,29 @@ async def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     )
 
 
-@router.get("/", response_model=List[ProjectResponse])
+@router.get("/", response_model=PaginatedProjectResponse)
 async def list_projects(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """List all projects"""
+    """List all projects with total count for pagination"""
     projects = crud_hierarchy.list_projects(db, skip=skip, limit=limit)
-    return [
-        ProjectResponse(
-            id=p.id,
-            name=p.name,
-            state=p.state,
-            corridor_name=p.corridor_name,
-            start_lat=p.start_lat,
-            start_lng=p.start_lng,
-            end_lat=p.end_lat,
-            end_lng=p.end_lng,
-            created_at=p.created_at.isoformat(),
-            updated_at=p.updated_at.isoformat(),
-        )
-        for p in projects
-    ]
+    total = crud_hierarchy.count_projects(db)
+    return PaginatedProjectResponse(
+        items=[
+            ProjectResponse(
+                id=p.id,
+                name=p.name,
+                state=p.state,
+                corridor_name=p.corridor_name,
+                start_lat=p.start_lat,
+                start_lng=p.start_lng,
+                end_lat=p.end_lat,
+                end_lng=p.end_lng,
+                created_at=p.created_at.isoformat(),
+                updated_at=p.updated_at.isoformat(),
+            )
+            for p in projects
+        ],
+        totalItems=total,
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)

@@ -29,7 +29,6 @@ async def upload_video(
     detection_mode: DetectionMode = Form(DetectionMode.YOLO_VL),
     speed_kmh: int = Form(30),
     chainage_id: str = Form(None),
-    lane_id: str = Form(None),
     db: Session = Depends(get_db),
 ):
     """Upload video and start background processing.
@@ -47,7 +46,6 @@ async def upload_video(
         detection_mode=detection_mode,
         speed_kmh=speed_kmh,
         chainage_id=chainage_id,
-        lane_id=lane_id,
         db=db,
     )
 

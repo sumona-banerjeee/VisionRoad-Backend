@@ -1,16 +1,24 @@
 """Chainage model for NHAI-style linear road segments (replaces Location)"""
 
+import enum
+
 import uuid
-from sqlalchemy import String, Float, ForeignKey
+from sqlalchemy import String, Float, ForeignKey, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
+
+
+class DirectionEnum(str, enum.Enum):
+    """Direction of travel along the chainage"""
+    UP = "UP"
+    DOWN = "DOWN"
 
 
 class Chainage(Base, TimestampMixin):
     """
     NHAI-style linear road segment defined by absolute kilometer markers.
-    Belongs to a Package. Contains one or more Lanes.
-    Example: KM 100–120 of NH-19, KM 45–90 of NH-44
+    Belongs to a Package. Each chainage has a direction (UP or DOWN).
+    Example: KM 100–120 of NH-19 (UP), KM 45–90 of NH-44 (DOWN)
     """
 
     __tablename__ = "chainages"
@@ -41,12 +49,14 @@ class Chainage(Base, TimestampMixin):
     end_lat: Mapped[float] = mapped_column(Float, nullable=False)
     end_lng: Mapped[float] = mapped_column(Float, nullable=False)
 
+    # Direction of travel (UP or DOWN)
+    direction: Mapped[str] = mapped_column(
+        SAEnum(DirectionEnum, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+    )
+
     # Relationships
     package: Mapped["Package"] = relationship("Package", back_populates="chainages")
-
-    lanes: Mapped[list["Lane"]] = relationship(
-        "Lane", back_populates="chainage", cascade="all, delete-orphan"
-    )
 
     videos: Mapped[list["Video"]] = relationship(
         "Video", back_populates="chainage", cascade="all, delete-orphan"

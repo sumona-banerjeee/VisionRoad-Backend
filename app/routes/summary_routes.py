@@ -6,7 +6,6 @@ from sqlalchemy import func
 from app.db.database import get_db
 from app.models.detection import Detection
 from app.models.chainage import Chainage
-from app.models.lane import Lane
 from app.models.package import Package
 from app.models.project import Project
 
@@ -19,16 +18,15 @@ async def get_project_summary(
     project_id: str, video_id: str = None, db: Session = Depends(get_db)
 ):
     """
-    Get detection summary for a project, grouped by package → chainage → lane.
+    Get detection summary for a project, grouped by package → chainage (with direction).
     """
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
     query = (
-        db.query(Detection, Chainage, Lane, Package)
+        db.query(Detection, Chainage, Package)
         .join(Chainage, Detection.chainage_id == Chainage.id)
-        .outerjoin(Lane, Detection.lane_id == Lane.id)
         .join(Package, Chainage.package_id == Package.id)
         .filter(Detection.project_id == project_id)
     )
@@ -48,7 +46,7 @@ async def get_project_summary(
         "packages": {},
     }
 
-    for detection, chainage, lane, package in detections:
+    for detection, chainage, package in detections:
         # Package level
         if package.name not in summary["packages"]:
             summary["packages"][package.name] = {
@@ -57,27 +55,19 @@ async def get_project_summary(
                 "chainages": {},
             }
 
-        # Chainage level
-        ch_key = chainage.segment_name
+        # Chainage level — key includes direction for uniqueness
+        ch_key = f"{chainage.segment_name} ({chainage.direction})"
         if ch_key not in summary["packages"][package.name]["chainages"]:
             summary["packages"][package.name]["chainages"][ch_key] = {
                 "chainage_id": chainage.id,
                 "chainage_km": f"{chainage.chainage_start_km}–{chainage.chainage_end_km} km",
-                "lanes": {},
-            }
-
-        # Lane level — lane may be None when lane_id was not set at upload time
-        lane_key = lane.lane_code if lane else "unassigned"
-        if lane_key not in summary["packages"][package.name]["chainages"][ch_key]["lanes"]:
-            summary["packages"][package.name]["chainages"][ch_key]["lanes"][lane_key] = {
-                "lane_id": lane.id if lane else None,
-                "lane_type": lane.lane_type if lane else None,
+                "direction": chainage.direction,
                 "detection_count": 0,
                 "detections": [],
             }
 
         _append_detection(
-            summary["packages"][package.name]["chainages"][ch_key]["lanes"][lane_key],
+            summary["packages"][package.name]["chainages"][ch_key],
             detection,
         )
 
@@ -89,16 +79,15 @@ async def get_package_summary(
     package_id: str, video_id: str = None, db: Session = Depends(get_db)
 ):
     """
-    Get detection summary for a package, grouped by chainage → lane.
+    Get detection summary for a package, grouped by chainage (with direction).
     """
     package = db.query(Package).filter(Package.id == package_id).first()
     if not package:
         raise HTTPException(status_code=404, detail="Package not found")
 
     query = (
-        db.query(Detection, Chainage, Lane)
+        db.query(Detection, Chainage)
         .join(Chainage, Detection.chainage_id == Chainage.id)
-        .outerjoin(Lane, Detection.lane_id == Lane.id)
         .filter(Detection.package_id == package_id)
     )
 
@@ -122,25 +111,18 @@ async def get_package_summary(
         "chainages": {},
     }
 
-    for detection, chainage, lane in detections:
-        ch_key = chainage.segment_name
+    for detection, chainage in detections:
+        ch_key = f"{chainage.segment_name} ({chainage.direction})"
         if ch_key not in summary["chainages"]:
             summary["chainages"][ch_key] = {
                 "chainage_id": chainage.id,
                 "chainage_km": f"{chainage.chainage_start_km}–{chainage.chainage_end_km} km",
-                "lanes": {},
-            }
-
-        lane_key = lane.lane_code if lane else "unassigned"
-        if lane_key not in summary["chainages"][ch_key]["lanes"]:
-            summary["chainages"][ch_key]["lanes"][lane_key] = {
-                "lane_id": lane.id if lane else None,
-                "lane_type": lane.lane_type if lane else None,
+                "direction": chainage.direction,
                 "detection_count": 0,
                 "detections": [],
             }
 
-        _append_detection(summary["chainages"][ch_key]["lanes"][lane_key], detection)
+        _append_detection(summary["chainages"][ch_key], detection)
 
     return summary
 
@@ -150,15 +132,14 @@ async def get_chainage_summary(
     chainage_id: str, video_id: str = None, db: Session = Depends(get_db)
 ):
     """
-    Get detection summary for a specific chainage, grouped by lane.
+    Get detection summary for a specific chainage.
     """
     chainage = db.query(Chainage).filter(Chainage.id == chainage_id).first()
     if not chainage:
         raise HTTPException(status_code=404, detail="Chainage not found")
 
     query = (
-        db.query(Detection, Lane)
-        .outerjoin(Lane, Detection.lane_id == Lane.id)
+        db.query(Detection)
         .filter(Detection.chainage_id == chainage_id)
     )
 
@@ -179,25 +160,18 @@ async def get_chainage_summary(
             "id": chainage.id,
             "segment_name": chainage.segment_name,
             "chainage_km": f"{chainage.chainage_start_km}–{chainage.chainage_end_km} km",
+            "direction": chainage.direction,
             "package_id": chainage.package_id,
         },
         "statistics": {
             "total_detections": sum(c for _, c in detection_counts),
             "by_type": {dtype: count for dtype, count in detection_counts},
         },
-        "lanes": {},
+        "detections": [],
     }
 
-    for detection, lane in detections:
-        lane_key = lane.lane_code if lane else "unassigned"
-        if lane_key not in summary["lanes"]:
-            summary["lanes"][lane_key] = {
-                "lane_id": lane.id if lane else None,
-                "lane_type": lane.lane_type if lane else None,
-                "detection_count": 0,
-                "detections": [],
-            }
-        _append_detection(summary["lanes"][lane_key], detection)
+    for detection in detections:
+        _append_detection(summary, detection)
 
     return summary
 
@@ -242,7 +216,7 @@ async def get_project_statistics(project_id: str, db: Session = Depends(get_db))
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _append_detection(container: dict, detection: Detection) -> None:
-    """Append a detection record to a lane-level summary container."""
+    """Append a detection record to a summary container."""
     container["detection_count"] += 1
     container["detections"].append(
         {

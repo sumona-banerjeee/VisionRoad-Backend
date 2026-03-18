@@ -8,7 +8,6 @@ from app.routes.upload_process_routes import router as upload_router
 from app.routes.project_routes import router as project_router
 from app.routes.package_routes import router as package_router
 from app.routes.chainage_routes import router as chainage_router
-from app.routes.lane_routes import router as lane_router
 from app.routes.summary_routes import router as summary_router
 from app.db.database import init_db
 import app.core.config  # noqa: F401 — imported first to run load_dotenv() before any os.getenv() calls
@@ -66,7 +65,6 @@ def create_app():
                 "projects": "/api/v1/projects",
                 "packages": "/api/v1/packages",
                 "chainages": "/api/v1/chainages",
-                "lanes": "/api/v1/lanes",
                 "summary": "/api/v1/summary",
                 "upload": "/api/v1/upload",
                 "status": "/api/v1/status/{video_id}",
@@ -80,7 +78,6 @@ def create_app():
     app.include_router(project_router, prefix=f"{api_prefix}", tags=["Projects"])
     app.include_router(package_router, prefix=f"{api_prefix}", tags=["Packages"])
     app.include_router(chainage_router, prefix=f"{api_prefix}", tags=["Chainages"])
-    app.include_router(lane_router, prefix=f"{api_prefix}", tags=["Lanes"])
     app.include_router(summary_router, prefix=f"{api_prefix}", tags=["Analytics"])
     app.include_router(upload_router, prefix=f"{api_prefix}", tags=["Detection"])
 

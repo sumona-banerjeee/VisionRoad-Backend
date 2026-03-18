@@ -7,6 +7,7 @@ from typing import Optional, List
 from app.db.database import get_db
 from app.db import crud_hierarchy
 from app.services.chainage_mapper import validate_gps_bounds
+from app.models.chainage import DirectionEnum
 
 
 router = APIRouter(prefix="/chainages", tags=["Chainages"])
@@ -23,6 +24,7 @@ class ChainageCreate(BaseModel):
     start_lng: float = Field(..., ge=-180, le=180)
     end_lat: float = Field(..., ge=-90, le=90)
     end_lng: float = Field(..., ge=-180, le=180)
+    direction: DirectionEnum = Field(..., description="Direction of travel: UP or DOWN")
 
 
 class ChainageUpdate(BaseModel):
@@ -33,6 +35,7 @@ class ChainageUpdate(BaseModel):
     start_lng: Optional[float] = Field(None, ge=-180, le=180)
     end_lat: Optional[float] = Field(None, ge=-90, le=90)
     end_lng: Optional[float] = Field(None, ge=-180, le=180)
+    direction: Optional[DirectionEnum] = Field(None, description="Direction of travel: UP or DOWN")
 
 
 class ChainageResponse(BaseModel):
@@ -45,6 +48,7 @@ class ChainageResponse(BaseModel):
     start_lng: float
     end_lat: float
     end_lng: float
+    direction: str
     created_at: str
     updated_at: str
 
@@ -92,6 +96,7 @@ async def create_chainage(chainage: ChainageCreate, db: Session = Depends(get_db
         start_lng=chainage.start_lng,
         end_lat=chainage.end_lat,
         end_lng=chainage.end_lng,
+        direction=chainage.direction.value,
     )
     return _to_response(new_chainage)
 
@@ -153,7 +158,7 @@ async def update_chainage(
 
 @router.delete("/{chainage_id}", status_code=204)
 async def delete_chainage(chainage_id: str, db: Session = Depends(get_db)):
-    """Delete a chainage (cascades to lanes, videos)"""
+    """Delete a chainage (cascades to videos)"""
     success = crud_hierarchy.delete_chainage(db, chainage_id)
     if not success:
         raise HTTPException(status_code=404, detail="Chainage not found")
@@ -173,6 +178,7 @@ def _to_response(c) -> ChainageResponse:
         start_lng=c.start_lng,
         end_lat=c.end_lat,
         end_lng=c.end_lng,
+        direction=c.direction,
         created_at=c.created_at.isoformat(),
         updated_at=c.updated_at.isoformat(),
     )

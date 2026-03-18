@@ -111,7 +111,7 @@ async def update_package(
 
 @router.delete("/{package_id}", status_code=204)
 async def delete_package(package_id: str, db: Session = Depends(get_db)):
-    """Delete a package (cascades to chainages, lanes, videos)"""
+    """Delete a package (cascades to chainages, videos)"""
     success = crud_hierarchy.delete_package(db, package_id)
     if not success:
         raise HTTPException(status_code=404, detail="Package not found")

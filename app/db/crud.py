@@ -21,7 +21,6 @@ def create_video(
     detection_type: str,
     speed_kmh: int,
     chainage_id: Optional[str] = None,
-    lane_id: Optional[str] = None,
 ) -> Video:
     """Create a new video record"""
     video = Video(
@@ -32,7 +31,6 @@ def create_video(
         detection_type=detection_type,
         speed_kmh=speed_kmh,
         chainage_id=chainage_id,
-        lane_id=lane_id,
         uploaded_at=datetime.utcnow(),
     )
     db.add(video)
@@ -96,7 +94,6 @@ def create_detection(
     project_id: Optional[str] = None,
     package_id: Optional[str] = None,
     chainage_id: Optional[str] = None,
-    lane_id: Optional[str] = None,
 ) -> Detection:
     """Create a new detection record"""
     detection = Detection(
@@ -112,7 +109,6 @@ def create_detection(
         project_id=project_id,
         package_id=package_id,
         chainage_id=chainage_id,
-        lane_id=lane_id,
     )
     detection.set_bounding_box(bounding_box)
     db.add(detection)

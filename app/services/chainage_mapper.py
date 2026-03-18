@@ -10,7 +10,7 @@ def get_chainage_hierarchy(db: Session, chainage_id: str) -> Optional[dict]:
     Get full hierarchy (Project → Package → Chainage) for a chainage.
 
     Returns:
-        Dictionary with project, package, chainage, and lanes details
+        Dictionary with project, package, and chainage details
     """
     chainage = db.query(Chainage).filter(Chainage.id == chainage_id).first()
     if not chainage:
@@ -45,16 +45,8 @@ def get_chainage_hierarchy(db: Session, chainage_id: str) -> Optional[dict]:
             "segment_name": chainage.segment_name,
             "chainage_start_km": chainage.chainage_start_km,
             "chainage_end_km": chainage.chainage_end_km,
+            "direction": chainage.direction,
         },
-        "lanes": [
-            {
-                "id": lane.id,
-                "lane_code": lane.lane_code,
-                "lane_type": lane.lane_type,
-                "direction": lane.direction,
-            }
-            for lane in chainage.lanes
-        ],
     }
 
 

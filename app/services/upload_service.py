@@ -75,7 +75,6 @@ class UploadService:
         detection_mode: DetectionMode,
         speed_kmh: int = 30,
         chainage_id: str = None,
-        lane_id: str = None,
         db: Session = Depends(get_db),
     ):
         """Upload video and start background processing"""
@@ -116,7 +115,6 @@ class UploadService:
                 detection_type=detection_mode,
                 speed_kmh=speed_kmh,
                 chainage_id=chainage_id,
-                lane_id=lane_id,
             )
 
             # Create initial processing status

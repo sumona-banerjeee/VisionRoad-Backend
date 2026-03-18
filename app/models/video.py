@@ -23,10 +23,16 @@ class Video(Base, TimestampMixin):
     processed_video_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     json_file_path: Mapped[str] = mapped_column(String(512), nullable=False)
 
-    # Location linkage
-    location_id: Mapped[str | None] = mapped_column(
+    # Chainage + Lane linkage (replaces location_id)
+    chainage_id: Mapped[str | None] = mapped_column(
         String(36),
-        ForeignKey("locations.id", ondelete="SET NULL"),
+        ForeignKey("chainages.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    lane_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("lanes.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
@@ -41,7 +47,8 @@ class Video(Base, TimestampMixin):
     )
 
     # Relationships
-    location: Mapped["Location"] = relationship("Location", back_populates="videos")
+    chainage: Mapped["Chainage"] = relationship("Chainage", back_populates="videos")
+    lane: Mapped["Lane"] = relationship("Lane", back_populates="videos")
 
     detections: Mapped[list["Detection"]] = relationship(
         "Detection", back_populates="video", cascade="all, delete-orphan"

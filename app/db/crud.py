@@ -20,7 +20,8 @@ def create_video(
     json_file_path: str,
     detection_type: str,
     speed_kmh: int,
-    location_id: Optional[str] = None,
+    chainage_id: Optional[str] = None,
+    lane_id: Optional[str] = None,
 ) -> Video:
     """Create a new video record"""
     video = Video(
@@ -30,7 +31,8 @@ def create_video(
         json_file_path=json_file_path,
         detection_type=detection_type,
         speed_kmh=speed_kmh,
-        location_id=location_id,
+        chainage_id=chainage_id,
+        lane_id=lane_id,
         uploaded_at=datetime.utcnow(),
     )
     db.add(video)
@@ -93,7 +95,8 @@ def create_detection(
     longitude: Optional[float] = None,
     project_id: Optional[str] = None,
     package_id: Optional[str] = None,
-    location_id: Optional[str] = None,
+    chainage_id: Optional[str] = None,
+    lane_id: Optional[str] = None,
 ) -> Detection:
     """Create a new detection record"""
     detection = Detection(
@@ -108,7 +111,8 @@ def create_detection(
         bounding_box="",  # Will be set by set_bounding_box
         project_id=project_id,
         package_id=package_id,
-        location_id=location_id,
+        chainage_id=chainage_id,
+        lane_id=lane_id,
     )
     detection.set_bounding_box(bounding_box)
     db.add(detection)

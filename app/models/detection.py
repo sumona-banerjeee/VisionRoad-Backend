@@ -23,14 +23,17 @@ class Detection(Base):
     )
 
     # Project hierarchy (denormalized for efficient querying)
-    # These allow filtering detections by project/package/location without joins
+    # These allow filtering detections by project/package/chainage/lane without joins
     project_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, index=True
     )
     package_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, index=True
     )
-    location_id: Mapped[str | None] = mapped_column(
+    chainage_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
+    lane_id: Mapped[str | None] = mapped_column(
         String(36), nullable=True, index=True
     )
 

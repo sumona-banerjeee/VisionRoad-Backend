@@ -16,11 +16,15 @@ class PackageCreate(BaseModel):
     project_id: str = Field(..., min_length=36, max_length=36)
     name: str = Field(..., min_length=1, max_length=255)
     region: Optional[str] = Field(None, max_length=255)
+    chainage_start_km: Optional[float] = Field(None, ge=0, description="Absolute NHAI start KM of this package")
+    chainage_end_km: Optional[float] = Field(None, ge=0, description="Absolute NHAI end KM of this package")
 
 
 class PackageUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     region: Optional[str] = Field(None, max_length=255)
+    chainage_start_km: Optional[float] = Field(None, ge=0)
+    chainage_end_km: Optional[float] = Field(None, ge=0)
 
 
 class PackageResponse(BaseModel):
@@ -28,6 +32,8 @@ class PackageResponse(BaseModel):
     project_id: str
     name: str
     region: Optional[str]
+    chainage_start_km: Optional[float]
+    chainage_end_km: Optional[float]
     created_at: str
     updated_at: str
 
@@ -45,16 +51,14 @@ async def create_package(package: PackageCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Project not found")
 
     new_package = crud_hierarchy.create_package(
-        db=db, project_id=package.project_id, name=package.name, region=package.region
+        db=db,
+        project_id=package.project_id,
+        name=package.name,
+        region=package.region,
+        chainage_start_km=package.chainage_start_km,
+        chainage_end_km=package.chainage_end_km,
     )
-    return PackageResponse(
-        id=new_package.id,
-        project_id=new_package.project_id,
-        name=new_package.name,
-        region=new_package.region,
-        created_at=new_package.created_at.isoformat(),
-        updated_at=new_package.updated_at.isoformat(),
-    )
+    return _to_response(new_package)
 
 
 @router.get("/", response_model=List[PackageResponse])
@@ -68,17 +72,7 @@ async def list_packages(
     packages = crud_hierarchy.list_packages(
         db, project_id=project_id, skip=skip, limit=limit
     )
-    return [
-        PackageResponse(
-            id=p.id,
-            project_id=p.project_id,
-            name=p.name,
-            region=p.region,
-            created_at=p.created_at.isoformat(),
-            updated_at=p.updated_at.isoformat(),
-        )
-        for p in packages
-    ]
+    return [_to_response(p) for p in packages]
 
 
 @router.get("/{package_id}", response_model=PackageResponse)
@@ -87,15 +81,7 @@ async def get_package(package_id: str, db: Session = Depends(get_db)):
     package = crud_hierarchy.get_package(db, package_id)
     if not package:
         raise HTTPException(status_code=404, detail="Package not found")
-
-    return PackageResponse(
-        id=package.id,
-        project_id=package.project_id,
-        name=package.name,
-        region=package.region,
-        created_at=package.created_at.isoformat(),
-        updated_at=package.updated_at.isoformat(),
-    )
+    return _to_response(package)
 
 
 @router.put("/{package_id}", response_model=PackageResponse)
@@ -109,20 +95,26 @@ async def update_package(
     if not updated_package:
         raise HTTPException(status_code=404, detail="Package not found")
 
-    return PackageResponse(
-        id=updated_package.id,
-        project_id=updated_package.project_id,
-        name=updated_package.name,
-        region=updated_package.region,
-        created_at=updated_package.created_at.isoformat(),
-        updated_at=updated_package.updated_at.isoformat(),
-    )
+    return _to_response(updated_package)
 
 
 @router.delete("/{package_id}", status_code=204)
 async def delete_package(package_id: str, db: Session = Depends(get_db)):
-    """Delete a package (cascades to locations)"""
+    """Delete a package (cascades to chainages, lanes, videos)"""
     success = crud_hierarchy.delete_package(db, package_id)
     if not success:
         raise HTTPException(status_code=404, detail="Package not found")
     return None
+
+
+def _to_response(p) -> PackageResponse:
+    return PackageResponse(
+        id=p.id,
+        project_id=p.project_id,
+        name=p.name,
+        region=p.region,
+        chainage_start_km=p.chainage_start_km,
+        chainage_end_km=p.chainage_end_km,
+        created_at=p.created_at.isoformat(),
+        updated_at=p.updated_at.isoformat(),
+    )

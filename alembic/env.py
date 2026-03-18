@@ -10,7 +10,7 @@ from app.db.base import Base
 from app.core.config import settings
 
 # Import all models to ensure they're registered with SQLAlchemy
-from app.models import project, package, location, video, detection, processing  # noqa
+from app.models import project, package, chainage, lane, video, detection, processing  # noqa
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -1,7 +1,7 @@
 """Package model for project subdivisions"""
 
 import uuid
-from sqlalchemy import String, ForeignKey
+from sqlalchemy import String, Float, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
 
@@ -9,7 +9,8 @@ from app.db.base import Base, TimestampMixin
 class Package(Base, TimestampMixin):
     """
     Project subdivision representing regional sections.
-    Example: "Kolkata-Patna Section", "Package A - West Bengal"
+    Covers an absolute NHAI kilometer range on the highway.
+    Example: "Package A — KM 100-200", "Kolkata-Patna Section"
     """
 
     __tablename__ = "packages"
@@ -31,11 +32,16 @@ class Package(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     region: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Absolute NHAI kilometer range covered by this package (optional)
+    # e.g. chainage_start_km=100.0, chainage_end_km=200.0
+    chainage_start_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    chainage_end_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Relationships
     project: Mapped["Project"] = relationship("Project", back_populates="packages")
 
-    locations: Mapped[list["Location"]] = relationship(
-        "Location", back_populates="package", cascade="all, delete-orphan"
+    chainages: Mapped[list["Chainage"]] = relationship(
+        "Chainage", back_populates="package", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:

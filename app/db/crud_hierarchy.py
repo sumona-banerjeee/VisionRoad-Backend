@@ -1,11 +1,12 @@
-"""CRUD operations for Project, Package, and Location models"""
+"""CRUD operations for Project, Package, Chainage, and Lane models"""
 
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, and_, or_
 from typing import Optional, List
 from app.models.project import Project
 from app.models.package import Package
-from app.models.location import Location
+from app.models.chainage import Chainage
+from app.models.lane import Lane
 import uuid
 
 
@@ -68,7 +69,7 @@ def update_project(db: Session, project_id: str, **kwargs) -> Optional[Project]:
 
 
 def delete_project(db: Session, project_id: str) -> bool:
-    """Delete a project (cascades to packages, locations)"""
+    """Delete a project (cascades to packages, chainages, lanes)"""
     project = get_project(db, project_id)
     if project:
         db.delete(project)
@@ -81,11 +82,21 @@ def delete_project(db: Session, project_id: str) -> bool:
 
 
 def create_package(
-    db: Session, project_id: str, name: str, region: Optional[str] = None
+    db: Session,
+    project_id: str,
+    name: str,
+    region: Optional[str] = None,
+    chainage_start_km: Optional[float] = None,
+    chainage_end_km: Optional[float] = None,
 ) -> Package:
     """Create a new package in a project"""
     package = Package(
-        id=str(uuid.uuid4()), project_id=project_id, name=name, region=region
+        id=str(uuid.uuid4()),
+        project_id=project_id,
+        name=name,
+        region=region,
+        chainage_start_km=chainage_start_km,
+        chainage_end_km=chainage_end_km,
     )
     db.add(package)
     db.commit()
@@ -121,7 +132,7 @@ def update_package(db: Session, package_id: str, **kwargs) -> Optional[Package]:
 
 
 def delete_package(db: Session, package_id: str) -> bool:
-    """Delete a package (cascades to locations)"""
+    """Delete a package (cascades to chainages, lanes, videos)"""
     package = get_package(db, package_id)
     if package:
         db.delete(package)
@@ -130,22 +141,22 @@ def delete_package(db: Session, package_id: str) -> bool:
     return False
 
 
-# ==================== Location CRUD ====================
+# ==================== Chainage CRUD ====================
 
 
-def create_location(
+def create_chainage(
     db: Session,
     package_id: str,
     segment_name: str,
+    chainage_start_km: float,
+    chainage_end_km: float,
     start_lat: float,
     start_lng: float,
     end_lat: float,
     end_lng: float,
-    chainage_start_km: Optional[float] = None,
-    chainage_end_km: Optional[float] = None,
-) -> Location:
-    """Create a new location in a package"""
-    location = Location(
+) -> Chainage:
+    """Create a new chainage in a package"""
+    chainage = Chainage(
         id=str(uuid.uuid4()),
         package_id=package_id,
         segment_name=segment_name,
@@ -156,57 +167,59 @@ def create_location(
         end_lat=end_lat,
         end_lng=end_lng,
     )
-    db.add(location)
+    db.add(chainage)
     db.commit()
-    db.refresh(location)
-    return location
+    db.refresh(chainage)
+    return chainage
 
 
-def get_location(db: Session, location_id: str) -> Optional[Location]:
-    """Get a location by ID"""
-    return db.query(Location).filter(Location.id == location_id).first()
+def get_chainage(db: Session, chainage_id: str) -> Optional[Chainage]:
+    """Get a chainage by ID"""
+    return db.query(Chainage).filter(Chainage.id == chainage_id).first()
 
 
-def list_locations(
+def list_chainages(
     db: Session, package_id: Optional[str] = None, skip: int = 0, limit: int = 100
-) -> List[Location]:
-    """Get all locations, optionally filtered by package"""
-    query = db.query(Location)
+) -> List[Chainage]:
+    """Get all chainages, optionally filtered by package"""
+    query = db.query(Chainage)
     if package_id:
-        query = query.filter(Location.package_id == package_id)
-    return query.order_by(desc(Location.created_at)).offset(skip).limit(limit).all()
+        query = query.filter(Chainage.package_id == package_id)
+    return (
+        query.order_by(Chainage.chainage_start_km).offset(skip).limit(limit).all()
+    )
 
 
-def update_location(db: Session, location_id: str, **kwargs) -> Optional[Location]:
-    """Update location fields"""
-    location = get_location(db, location_id)
-    if location:
+def update_chainage(db: Session, chainage_id: str, **kwargs) -> Optional[Chainage]:
+    """Update chainage fields"""
+    chainage = get_chainage(db, chainage_id)
+    if chainage:
         for key, value in kwargs.items():
-            if hasattr(location, key):
-                setattr(location, key, value)
+            if hasattr(chainage, key):
+                setattr(chainage, key, value)
         db.commit()
-        db.refresh(location)
-    return location
+        db.refresh(chainage)
+    return chainage
 
 
-def delete_location(db: Session, location_id: str) -> bool:
-    """Delete a location (cascades to videos)"""
-    location = get_location(db, location_id)
-    if location:
-        db.delete(location)
+def delete_chainage(db: Session, chainage_id: str) -> bool:
+    """Delete a chainage (cascades to lanes, videos)"""
+    chainage = get_chainage(db, chainage_id)
+    if chainage:
+        db.delete(chainage)
         db.commit()
         return True
     return False
 
 
-# ==================== Location Lookup ====================
+# ==================== Chainage Lookup ====================
 
 
-def find_location_by_gps(
+def find_chainage_by_gps(
     db: Session, lat: float, lng: float, package_id: Optional[str] = None
-) -> Optional[Location]:
+) -> Optional[Chainage]:
     """
-    Find location that contains the given GPS coordinates.
+    Find chainage that contains the given GPS coordinates.
     Uses bounding box matching.
 
     Args:
@@ -216,20 +229,81 @@ def find_location_by_gps(
         package_id: Optional package filter for faster lookup
 
     Returns:
-        Location if found, None otherwise
+        Chainage if found, None otherwise
     """
-    query = db.query(Location).filter(
+    query = db.query(Chainage).filter(
         or_(
-            and_(Location.start_lat <= lat, Location.end_lat >= lat),
-            and_(Location.end_lat <= lat, Location.start_lat >= lat),
+            and_(Chainage.start_lat <= lat, Chainage.end_lat >= lat),
+            and_(Chainage.end_lat <= lat, Chainage.start_lat >= lat),
         ),
         or_(
-            and_(Location.start_lng <= lng, Location.end_lng >= lng),
-            and_(Location.end_lng <= lng, Location.start_lng >= lng),
+            and_(Chainage.start_lng <= lng, Chainage.end_lng >= lng),
+            and_(Chainage.end_lng <= lng, Chainage.start_lng >= lng),
         ),
     )
 
     if package_id:
-        query = query.filter(Location.package_id == package_id)
+        query = query.filter(Chainage.package_id == package_id)
 
     return query.first()
+
+
+# ==================== Lane CRUD ====================
+
+
+def create_lane(
+    db: Session,
+    chainage_id: str,
+    lane_code: str,
+    lane_type: Optional[str] = None,
+    direction: Optional[str] = None,
+) -> Lane:
+    """Create a new lane in a chainage"""
+    lane = Lane(
+        id=str(uuid.uuid4()),
+        chainage_id=chainage_id,
+        lane_code=lane_code,
+        lane_type=lane_type,
+        direction=direction,
+    )
+    db.add(lane)
+    db.commit()
+    db.refresh(lane)
+    return lane
+
+
+def get_lane(db: Session, lane_id: str) -> Optional[Lane]:
+    """Get a lane by ID"""
+    return db.query(Lane).filter(Lane.id == lane_id).first()
+
+
+def list_lanes(
+    db: Session, chainage_id: Optional[str] = None, skip: int = 0, limit: int = 100
+) -> List[Lane]:
+    """Get all lanes, optionally filtered by chainage"""
+    query = db.query(Lane)
+    if chainage_id:
+        query = query.filter(Lane.chainage_id == chainage_id)
+    return query.order_by(Lane.lane_code).offset(skip).limit(limit).all()
+
+
+def update_lane(db: Session, lane_id: str, **kwargs) -> Optional[Lane]:
+    """Update lane fields"""
+    lane = get_lane(db, lane_id)
+    if lane:
+        for key, value in kwargs.items():
+            if hasattr(lane, key):
+                setattr(lane, key, value)
+        db.commit()
+        db.refresh(lane)
+    return lane
+
+
+def delete_lane(db: Session, lane_id: str) -> bool:
+    """Delete a lane (cascades to videos)"""
+    lane = get_lane(db, lane_id)
+    if lane:
+        db.delete(lane)
+        db.commit()
+        return True
+    return False

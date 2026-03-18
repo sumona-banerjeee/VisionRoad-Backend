@@ -27,7 +27,7 @@ from app.core.logging_config import PerfTimer, perf_logger
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
-from app.db.crud_hierarchy import find_location_by_gps
+from app.db.crud_hierarchy import find_chainage_by_gps
 
 logger = logging.getLogger(__name__)
 
@@ -920,19 +920,20 @@ class YoloDetector(BaseDetector):
             db_detections = []
             for det in all_detections:
                 lat, lng = det.get("lat"), det.get("lng")
-                project_id, package_id, location_id = None, None, None
+                project_id, package_id, chainage_id, lane_id = None, None, None, None
                 if lat and lng:
-                    # ⏱ Time the GPS-based location DB lookup
+                    # ⏱ Time the GPS-based chainage DB lookup
                     _t0 = time.perf_counter()
-                    location = find_location_by_gps(db, lat, lng)
+                    chainage = find_chainage_by_gps(db, lat, lng)
                     _gps_db_elapsed = time.perf_counter() - _t0
                     if perf_timings is not None:
                         perf_timings["db_gps_match"]["total"] += _gps_db_elapsed
                         perf_timings["db_gps_match"]["count"] += 1
-                    if location:
-                        location_id, package_id = location.id, location.package_id
-                        if location.package:
-                            project_id = location.package.project_id
+                    if chainage:
+                        chainage_id = chainage.id
+                        package_id = chainage.package_id
+                        if chainage.package:
+                            project_id = chainage.package.project_id
 
                 db_det = Detection(
                     video_id=video_id,
@@ -945,7 +946,8 @@ class YoloDetector(BaseDetector):
                     longitude=lng,
                     project_id=project_id,
                     package_id=package_id,
-                    location_id=location_id,
+                    chainage_id=chainage_id,
+                    lane_id=lane_id,
                 )
                 db_det.set_bounding_box(det.get("bbox", {}))
                 db_detections.append(db_det)

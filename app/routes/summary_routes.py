@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.db.database import get_db
 from app.models.detection import Detection
-from app.models.location import Location
+from app.models.chainage import Chainage
+from app.models.lane import Lane
 from app.models.package import Package
 from app.models.project import Project
 
@@ -18,44 +19,25 @@ async def get_project_summary(
     project_id: str, video_id: str = None, db: Session = Depends(get_db)
 ):
     """
-    Get detection summary for a project, grouped by package and location.
-
-    Response format:
-    {
-        "project": {...},
-        "packages": {
-            "Package Name": {
-                "locations": {
-                    "Segment Name": {
-                        "detection_count": 10,
-                        "detections": [...]
-                    }
-                }
-            }
-        }
-    }
+    Get detection summary for a project, grouped by package → chainage → lane.
     """
-    # Verify project exists
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Get all detections for this project with locations and packages
-    # Build query
     query = (
-        db.query(Detection, Location, Package)
-        .join(Location, Detection.location_id == Location.id)
-        .join(Package, Location.package_id == Package.id)
+        db.query(Detection, Chainage, Lane, Package)
+        .join(Chainage, Detection.chainage_id == Chainage.id)
+        .join(Lane, Detection.lane_id == Lane.id)
+        .join(Package, Chainage.package_id == Package.id)
         .filter(Detection.project_id == project_id)
     )
 
-    # Optional video_id filter
     if video_id:
         query = query.filter(Detection.video_id == video_id)
 
     detections = query.all()
 
-    # Build hierarchical response
     summary = {
         "project": {
             "id": project.id,
@@ -66,47 +48,37 @@ async def get_project_summary(
         "packages": {},
     }
 
-    for detection, location, package in detections:
-        # Initialize package if not exists
+    for detection, chainage, lane, package in detections:
+        # Package level
         if package.name not in summary["packages"]:
             summary["packages"][package.name] = {
                 "package_id": package.id,
                 "region": package.region,
-                "locations": {},
+                "chainages": {},
             }
 
-        # Initialize location if not exists
-        if location.segment_name not in summary["packages"][package.name]["locations"]:
-            summary["packages"][package.name]["locations"][location.segment_name] = {
-                "location_id": location.id,
-                "chainage": (
-                    f"{location.chainage_start_km}-{location.chainage_end_km} km"
-                    if location.chainage_start_km
-                    else None
-                ),
+        # Chainage level
+        ch_key = chainage.segment_name
+        if ch_key not in summary["packages"][package.name]["chainages"]:
+            summary["packages"][package.name]["chainages"][ch_key] = {
+                "chainage_id": chainage.id,
+                "chainage_km": f"{chainage.chainage_start_km}–{chainage.chainage_end_km} km",
+                "lanes": {},
+            }
+
+        # Lane level
+        lane_key = lane.lane_code
+        if lane_key not in summary["packages"][package.name]["chainages"][ch_key]["lanes"]:
+            summary["packages"][package.name]["chainages"][ch_key]["lanes"][lane_key] = {
+                "lane_id": lane.id,
+                "lane_type": lane.lane_type,
                 "detection_count": 0,
                 "detections": [],
             }
 
-        # Add detection
-        summary["packages"][package.name]["locations"][location.segment_name][
-            "detection_count"
-        ] += 1
-        summary["packages"][package.name]["locations"][location.segment_name][
-            "detections"
-        ].append(
-            {
-                "id": detection.id,
-                "video_id": detection.video_id,
-                "type": detection.detection_type,
-                "class": detection.class_name,
-                "confidence": detection.confidence,
-                "latitude": detection.latitude,
-                "longitude": detection.longitude,
-                "frame_number": detection.frame_number,
-                "timestamp_ms": detection.timestamp_ms,
-                "bounding_box": detection.get_bounding_box(),
-            }
+        _append_detection(
+            summary["packages"][package.name]["chainages"][ch_key]["lanes"][lane_key],
+            detection,
         )
 
     return summary
@@ -117,21 +89,19 @@ async def get_package_summary(
     package_id: str, video_id: str = None, db: Session = Depends(get_db)
 ):
     """
-    Get detection summary for a package, grouped by location.
+    Get detection summary for a package, grouped by chainage → lane.
     """
-    # Verify package exists
     package = db.query(Package).filter(Package.id == package_id).first()
     if not package:
         raise HTTPException(status_code=404, detail="Package not found")
 
-    # Build query
     query = (
-        db.query(Detection, Location)
-        .join(Location, Detection.location_id == Location.id)
+        db.query(Detection, Chainage, Lane)
+        .join(Chainage, Detection.chainage_id == Chainage.id)
+        .join(Lane, Detection.lane_id == Lane.id)
         .filter(Detection.package_id == package_id)
     )
 
-    # Optional video_id filter
     if video_id:
         query = query.filter(Detection.video_id == video_id)
 
@@ -143,102 +113,91 @@ async def get_package_summary(
             "name": package.name,
             "region": package.region,
             "project_id": package.project_id,
+            "chainage_km": (
+                f"{package.chainage_start_km}–{package.chainage_end_km} km"
+                if package.chainage_start_km is not None
+                else None
+            ),
         },
-        "locations": {},
+        "chainages": {},
     }
 
-    for detection, location in detections:
-        if location.segment_name not in summary["locations"]:
-            summary["locations"][location.segment_name] = {
-                "location_id": location.id,
-                "chainage": (
-                    f"{location.chainage_start_km}-{location.chainage_end_km} km"
-                    if location.chainage_start_km
-                    else None
-                ),
+    for detection, chainage, lane in detections:
+        ch_key = chainage.segment_name
+        if ch_key not in summary["chainages"]:
+            summary["chainages"][ch_key] = {
+                "chainage_id": chainage.id,
+                "chainage_km": f"{chainage.chainage_start_km}–{chainage.chainage_end_km} km",
+                "lanes": {},
+            }
+
+        lane_key = lane.lane_code
+        if lane_key not in summary["chainages"][ch_key]["lanes"]:
+            summary["chainages"][ch_key]["lanes"][lane_key] = {
+                "lane_id": lane.id,
+                "lane_type": lane.lane_type,
                 "detection_count": 0,
                 "detections": [],
             }
 
-        summary["locations"][location.segment_name]["detection_count"] += 1
-        summary["locations"][location.segment_name]["detections"].append(
-            {
-                "id": detection.id,
-                "video_id": detection.video_id,
-                "type": detection.detection_type,
-                "class": detection.class_name,
-                "confidence": detection.confidence,
-                "latitude": detection.latitude,
-                "longitude": detection.longitude,
-                "frame_number": detection.frame_number,
-                "timestamp_ms": detection.timestamp_ms,
-                "bounding_box": detection.get_bounding_box(),
-            }
-        )
+        _append_detection(summary["chainages"][ch_key]["lanes"][lane_key], detection)
 
     return summary
 
 
-@router.get("/locations/{location_id}")
-async def get_location_summary(
-    location_id: str, video_id: str = None, db: Session = Depends(get_db)
+@router.get("/chainages/{chainage_id}")
+async def get_chainage_summary(
+    chainage_id: str, video_id: str = None, db: Session = Depends(get_db)
 ):
     """
-    Get detection summary for a specific location.
+    Get detection summary for a specific chainage, grouped by lane.
     """
-    # Verify location exists
-    location = db.query(Location).filter(Location.id == location_id).first()
-    if not location:
-        raise HTTPException(status_code=404, detail="Location not found")
+    chainage = db.query(Chainage).filter(Chainage.id == chainage_id).first()
+    if not chainage:
+        raise HTTPException(status_code=404, detail="Chainage not found")
 
-    # Get all detections for this location
-    query = db.query(Detection).filter(Detection.location_id == location_id)
+    query = (
+        db.query(Detection, Lane)
+        .join(Lane, Detection.lane_id == Lane.id)
+        .filter(Detection.chainage_id == chainage_id)
+    )
 
-    # Optional video_id filter
     if video_id:
         query = query.filter(Detection.video_id == video_id)
 
     detections = query.all()
 
-    # Count by type
     detection_counts = (
         db.query(Detection.detection_type, func.count(Detection.id))
-        .filter(Detection.location_id == location_id)
+        .filter(Detection.chainage_id == chainage_id)
         .group_by(Detection.detection_type)
         .all()
     )
 
     summary = {
-        "location": {
-            "id": location.id,
-            "segment_name": location.segment_name,
-            "chainage": (
-                f"{location.chainage_start_km}-{location.chainage_end_km} km"
-                if location.chainage_start_km
-                else None
-            ),
-            "package_id": location.package_id,
+        "chainage": {
+            "id": chainage.id,
+            "segment_name": chainage.segment_name,
+            "chainage_km": f"{chainage.chainage_start_km}–{chainage.chainage_end_km} km",
+            "package_id": chainage.package_id,
         },
         "statistics": {
-            "total_detections": len(detections),
+            "total_detections": sum(c for _, c in detection_counts),
             "by_type": {dtype: count for dtype, count in detection_counts},
         },
-        "detections": [
-            {
-                "id": d.id,
-                "video_id": d.video_id,
-                "type": d.detection_type,
-                "class": d.class_name,
-                "confidence": d.confidence,
-                "latitude": d.latitude,
-                "longitude": d.longitude,
-                "frame_number": d.frame_number,
-                "timestamp_ms": d.timestamp_ms,
-                "bounding_box": d.get_bounding_box(),
-            }
-            for d in detections
-        ],
+        "lanes": {},
     }
+
+    for detection, lane in detections:
+        lane_key = lane.lane_code
+        if lane_key not in summary["lanes"]:
+            summary["lanes"][lane_key] = {
+                "lane_id": lane.id,
+                "lane_type": lane.lane_type,
+                "detection_count": 0,
+                "detections": [],
+            }
+        _append_detection(summary["lanes"][lane_key], detection)
 
     return summary
 
@@ -250,22 +209,19 @@ async def get_project_statistics(project_id: str, db: Session = Depends(get_db))
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # Count packages
     package_count = (
         db.query(func.count(Package.id))
         .filter(Package.project_id == project_id)
         .scalar()
     )
 
-    # Count locations
-    location_count = (
-        db.query(func.count(Location.id))
-        .join(Package, Location.package_id == Package.id)
+    chainage_count = (
+        db.query(func.count(Chainage.id))
+        .join(Package, Chainage.package_id == Package.id)
         .filter(Package.project_id == project_id)
         .scalar()
     )
 
-    # Count detections by type
     detection_stats = (
         db.query(Detection.detection_type, func.count(Detection.id))
         .filter(Detection.project_id == project_id)
@@ -277,7 +233,28 @@ async def get_project_statistics(project_id: str, db: Session = Depends(get_db))
         "project_id": project_id,
         "project_name": project.name,
         "package_count": package_count,
-        "location_count": location_count,
+        "chainage_count": chainage_count,
         "total_detections": sum(count for _, count in detection_stats),
         "detections_by_type": {dtype: count for dtype, count in detection_stats},
     }
+
+
+# ── Helper ────────────────────────────────────────────────────────────────────
+
+def _append_detection(container: dict, detection: Detection) -> None:
+    """Append a detection record to a lane-level summary container."""
+    container["detection_count"] += 1
+    container["detections"].append(
+        {
+            "id": detection.id,
+            "video_id": detection.video_id,
+            "type": detection.detection_type,
+            "class": detection.class_name,
+            "confidence": detection.confidence,
+            "latitude": detection.latitude,
+            "longitude": detection.longitude,
+            "frame_number": detection.frame_number,
+            "timestamp_ms": detection.timestamp_ms,
+            "bounding_box": detection.get_bounding_box(),
+        }
+    )

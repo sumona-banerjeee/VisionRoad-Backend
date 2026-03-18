@@ -20,11 +20,18 @@ class DetectionMode(str, Enum):
     """
     Available detection modes.
 
-    - YOLO     : YOLO-only inference (fast, no VL API calls)
-    - YOLO_VL  : YOLO inference + async VL cross-verification
-    - SAM3     : SAM3-based detection (not yet implemented — stub)
-    - YOLOE
-    - YOLOE_TRAINED_VL
+    Road-hazard modes (defects, sign boards, potholes, cracks):
+    - YOLO              : YOLO-only inference (fast, no VL API calls)
+    - YOLO_VL           : YOLO inference + async VL cross-verification
+    - SAM3              : YOLO inference + SAM3 verification
+    - YOLOE             : YOLOE open-vocabulary detection (text-prompted)
+    - YOLOE_TRAINED_VL  : YOLOE trained + VL verification
+
+    Culvert mode (good_culvert / defective_culvert):
+    - CULVERT_DETECTION : Culvert-specific model (culvert_best.pt) + BotSORT.
+                          NOTE: the detection_mode field in the upload form is
+                          ignored when this mode is chosen — CulvertDetector
+                          is always used regardless of any additional mode header.
     """
 
     YOLO = "yolo"
@@ -32,6 +39,7 @@ class DetectionMode(str, Enum):
     SAM3 = "sam3"
     YOLOE = "yoloe"
     YOLOE_TRAINED_VL = "yoloe_trained_vl"
+    CULVERT_DETECTION = "culvert_detection"
 
 
 # Keep backward-compatible alias so other internal code can still import DetectionType

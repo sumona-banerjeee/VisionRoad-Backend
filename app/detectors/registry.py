@@ -3,16 +3,17 @@ Detector Registry
 
 Maps DetectionMode enum values to factory functions that produce detector instances.
 
-The registry now uses a single YoloDetector for all modes. The detection mode
-determines which helper function (if any) is injected as a verification callback:
-
-  - yolo    : Pure YOLO inference (no verification)
-  - yolo_vl : YOLO inference + VL verification via helpers/vl_helper
-  - sam3    : YOLO inference + SAM3 processing via helpers/sam3_helper
+  - yolo              : Pure YOLO inference (no verification)
+  - yolo_vl           : YOLO + VL verification
+  - sam3              : YOLO + SAM3 verification
+  - yoloe             : YOLOE open-vocabulary
+  - yoloe_trained_vl  : YOLOE trained + VL
+  - culvert_detection : Culvert-specific model (culvert_best.pt) + BotSORT,
+                        no VL/SAM3 verification, dedup via track IDs only.
 
 To add a new detection mode:
-  1. Create a helper function in app/helpers/
-  2. Add a single entry here in DETECTOR_REGISTRY with the helper as verify_fn
+  1. Create a new detector in app/detectors/<name>/detector.py
+  2. Register a factory lambda here.
 """
 
 from app.detectors.yolo.detector import YoloDetector
@@ -20,11 +21,13 @@ from app.detectors.yoloe.detector import YoloeDetector
 from app.helpers.vl_helper import process_with_vl
 from app.helpers.sam3_helper import process_with_sam3
 from app.detectors.yoloe_trained_vl.detector import YoloeTrainedVlDetector
+from app.detectors.culvert.detector import CulvertDetector
 
 DETECTOR_REGISTRY = {
-    "yolo": lambda: YoloDetector(detection_mode="yolo"),
-    "yolo_vl": lambda: YoloDetector(verify_fn=process_with_vl, detection_mode="yolo_vl"),
-    "sam3": lambda: YoloDetector(verify_fn=process_with_sam3, detection_mode="sam3"),
-    "yoloe": lambda: YoloeDetector(),
-    "yoloe_trained_vl": lambda: YoloeTrainedVlDetector(),
+    "yolo":              lambda: YoloDetector(detection_mode="yolo"),
+    "yolo_vl":           lambda: YoloDetector(verify_fn=process_with_vl, detection_mode="yolo_vl"),
+    "sam3":              lambda: YoloDetector(verify_fn=process_with_sam3, detection_mode="sam3"),
+    "yoloe":             lambda: YoloeDetector(),
+    "yoloe_trained_vl":  lambda: YoloeTrainedVlDetector(),
+    "culvert_detection": lambda: CulvertDetector(detection_mode="culvert_detection"),
 }

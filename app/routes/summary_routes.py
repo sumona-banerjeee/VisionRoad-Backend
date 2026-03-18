@@ -28,7 +28,7 @@ async def get_project_summary(
     query = (
         db.query(Detection, Chainage, Lane, Package)
         .join(Chainage, Detection.chainage_id == Chainage.id)
-        .join(Lane, Detection.lane_id == Lane.id)
+        .outerjoin(Lane, Detection.lane_id == Lane.id)
         .join(Package, Chainage.package_id == Package.id)
         .filter(Detection.project_id == project_id)
     )
@@ -66,12 +66,12 @@ async def get_project_summary(
                 "lanes": {},
             }
 
-        # Lane level
-        lane_key = lane.lane_code
+        # Lane level — lane may be None when lane_id was not set at upload time
+        lane_key = lane.lane_code if lane else "unassigned"
         if lane_key not in summary["packages"][package.name]["chainages"][ch_key]["lanes"]:
             summary["packages"][package.name]["chainages"][ch_key]["lanes"][lane_key] = {
-                "lane_id": lane.id,
-                "lane_type": lane.lane_type,
+                "lane_id": lane.id if lane else None,
+                "lane_type": lane.lane_type if lane else None,
                 "detection_count": 0,
                 "detections": [],
             }
@@ -98,7 +98,7 @@ async def get_package_summary(
     query = (
         db.query(Detection, Chainage, Lane)
         .join(Chainage, Detection.chainage_id == Chainage.id)
-        .join(Lane, Detection.lane_id == Lane.id)
+        .outerjoin(Lane, Detection.lane_id == Lane.id)
         .filter(Detection.package_id == package_id)
     )
 
@@ -131,11 +131,11 @@ async def get_package_summary(
                 "lanes": {},
             }
 
-        lane_key = lane.lane_code
+        lane_key = lane.lane_code if lane else "unassigned"
         if lane_key not in summary["chainages"][ch_key]["lanes"]:
             summary["chainages"][ch_key]["lanes"][lane_key] = {
-                "lane_id": lane.id,
-                "lane_type": lane.lane_type,
+                "lane_id": lane.id if lane else None,
+                "lane_type": lane.lane_type if lane else None,
                 "detection_count": 0,
                 "detections": [],
             }
@@ -158,7 +158,7 @@ async def get_chainage_summary(
 
     query = (
         db.query(Detection, Lane)
-        .join(Lane, Detection.lane_id == Lane.id)
+        .outerjoin(Lane, Detection.lane_id == Lane.id)
         .filter(Detection.chainage_id == chainage_id)
     )
 
@@ -189,11 +189,11 @@ async def get_chainage_summary(
     }
 
     for detection, lane in detections:
-        lane_key = lane.lane_code
+        lane_key = lane.lane_code if lane else "unassigned"
         if lane_key not in summary["lanes"]:
             summary["lanes"][lane_key] = {
-                "lane_id": lane.id,
-                "lane_type": lane.lane_type,
+                "lane_id": lane.id if lane else None,
+                "lane_type": lane.lane_type if lane else None,
                 "detection_count": 0,
                 "detections": [],
             }

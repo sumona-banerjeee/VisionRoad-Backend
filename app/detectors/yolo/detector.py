@@ -918,9 +918,16 @@ class YoloDetector(BaseDetector):
         db = SessionLocal()
         try:
             db_detections = []
+            # Resolve lane_id once from the Video record — the lane was set
+            # at upload time and is the same for every detection in this video.
+            from app.models.video import Video
+            video_record = db.query(Video).filter(Video.id == video_id).first()
+            video_lane_id = video_record.lane_id if video_record else None
+
             for det in all_detections:
                 lat, lng = det.get("lat"), det.get("lng")
-                project_id, package_id, chainage_id, lane_id = None, None, None, None
+                project_id, package_id, chainage_id = None, None, None
+                lane_id = video_lane_id  # inherit from video
                 if lat and lng:
                     # ⏱ Time the GPS-based chainage DB lookup
                     _t0 = time.perf_counter()

@@ -11,6 +11,7 @@ def load_yolo_model(model_path: str):
     """
     Load YOLO model with PyTorch 2.6+ compatibility fix
     
+    
     Args:
         model_path: Path to the YOLO model file
         

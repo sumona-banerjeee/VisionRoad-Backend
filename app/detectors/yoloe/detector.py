@@ -36,7 +36,7 @@ from app.core.logging_config import PerfTimer, perf_logger
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
-from app.db.crud_hierarchy import find_location_by_gps
+from app.db.crud_hierarchy import find_chainage_by_gps
 from app.helpers.yoloe_helper import (
     load_yoloe_model,
     get_display_label,
@@ -735,7 +735,7 @@ class YoloeDetector(BaseDetector):
                 project_id, package_id, location_id = None, None, None
                 if lat and lng:
                     _t0 = time.perf_counter()
-                    location = find_location_by_gps(db, lat, lng)
+                    location = find_chainage_by_gps(db, lat, lng)
                     _gps_db_elapsed = time.perf_counter() - _t0
                     if perf_timings is not None:
                         perf_timings["db_gps_match"]["total"] += _gps_db_elapsed

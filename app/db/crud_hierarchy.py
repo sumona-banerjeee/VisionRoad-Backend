@@ -44,6 +44,10 @@ def get_project(db: Session, project_id: str) -> Optional[Project]:
     """Get a project by ID"""
     return db.query(Project).filter(Project.id == project_id).first()
 
+def count_projects(db: Session) -> int:
+    """Get total number of projects"""
+    return db.query(Project).count()
+
 
 def list_projects(db: Session, skip: int = 0, limit: int = 100) -> List[Project]:
     """Get all projects ordered by creation time (newest first)"""
@@ -107,6 +111,14 @@ def create_package(
 def get_package(db: Session, package_id: str) -> Optional[Package]:
     """Get a package by ID"""
     return db.query(Package).filter(Package.id == package_id).first()
+
+
+def count_packages(db: Session, project_id: Optional[str] = None) -> int:
+    """Get total number of packages, optionally filtered by project"""
+    query = db.query(Package)
+    if project_id:
+        query = query.filter(Package.project_id == project_id)
+    return query.count()
 
 
 def list_packages(
@@ -176,6 +188,13 @@ def create_chainage(
 def get_chainage(db: Session, chainage_id: str) -> Optional[Chainage]:
     """Get a chainage by ID"""
     return db.query(Chainage).filter(Chainage.id == chainage_id).first()
+
+def count_chainages(db: Session, package_id: Optional[str] = None) -> int:
+    """Get total number of chainages, optionally filtered by package"""
+    query = db.query(Chainage)
+    if package_id:
+        query = query.filter(Chainage.package_id == package_id)
+    return query.count()
 
 
 def list_chainages(
@@ -275,6 +294,13 @@ def create_lane(
 def get_lane(db: Session, lane_id: str) -> Optional[Lane]:
     """Get a lane by ID"""
     return db.query(Lane).filter(Lane.id == lane_id).first()
+
+def count_lanes(db: Session, chainage_id: Optional[str] = None) -> int:
+    """Get total number of lanes, optionally filtered by chainage"""
+    query = db.query(Lane)
+    if chainage_id:
+        query = query.filter(Lane.chainage_id == chainage_id)
+    return query.count()
 
 
 def list_lanes(

@@ -41,6 +41,11 @@ class PackageResponse(BaseModel):
         from_attributes = True
 
 
+class PaginatedPackageResponse(BaseModel):
+    items: List[PackageResponse]
+    totalItems: int
+
+
 # Routes
 @router.post("/", response_model=PackageResponse, status_code=201)
 async def create_package(package: PackageCreate, db: Session = Depends(get_db)):
@@ -61,7 +66,7 @@ async def create_package(package: PackageCreate, db: Session = Depends(get_db)):
     return _to_response(new_package)
 
 
-@router.get("/", response_model=List[PackageResponse])
+@router.get("/", response_model=PaginatedPackageResponse)
 async def list_packages(
     project_id: Optional[str] = None,
     skip: int = 0,
@@ -72,7 +77,13 @@ async def list_packages(
     packages = crud_hierarchy.list_packages(
         db, project_id=project_id, skip=skip, limit=limit
     )
-    return [_to_response(p) for p in packages]
+    total = crud_hierarchy.count_packages(db, project_id=project_id)
+
+    return PaginatedPackageResponse(
+        items=[_to_response(p) for p in packages],
+        totalItems=total,
+    )
+
 
 
 @router.get("/{package_id}", response_model=PackageResponse)

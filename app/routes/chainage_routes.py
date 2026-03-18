@@ -51,6 +51,10 @@ class ChainageResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class PaginatedChainageResponse(BaseModel):
+    items: List[ChainageResponse]
+    totalItems: int
+
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -92,7 +96,7 @@ async def create_chainage(chainage: ChainageCreate, db: Session = Depends(get_db
     return _to_response(new_chainage)
 
 
-@router.get("/", response_model=List[ChainageResponse])
+@router.get("/", response_model=PaginatedChainageResponse)
 async def list_chainages(
     package_id: Optional[str] = None,
     skip: int = 0,
@@ -103,7 +107,11 @@ async def list_chainages(
     chainages = crud_hierarchy.list_chainages(
         db, package_id=package_id, skip=skip, limit=limit
     )
-    return [_to_response(c) for c in chainages]
+    total = crud_hierarchy.count_chainages(db,package_id=package_id)
+    return PaginatedChainageResponse(
+        items=[_to_response(c) for c in chainages],
+        totalItems=total,
+    )
 
 
 @router.get("/{chainage_id}", response_model=ChainageResponse)

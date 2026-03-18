@@ -44,6 +44,9 @@ class LaneResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class PaginatedLaneResponse(BaseModel):
+    items: List[LaneResponse]
+    totalItems: int
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
@@ -65,7 +68,7 @@ async def create_lane(lane: LaneCreate, db: Session = Depends(get_db)):
     return _to_response(new_lane)
 
 
-@router.get("/", response_model=List[LaneResponse])
+@router.get("/", response_model=PaginatedLaneResponse)
 async def list_lanes(
     chainage_id: Optional[str] = None,
     skip: int = 0,
@@ -74,8 +77,13 @@ async def list_lanes(
 ):
     """List all lanes, optionally filtered by chainage"""
     lanes = crud_hierarchy.list_lanes(db, chainage_id=chainage_id, skip=skip, limit=limit)
-    return [_to_response(l) for l in lanes]
-
+    
+    total = crud_hierarchy.count_lanes(db,chainage_id=chainage_id)
+    return PaginatedLaneResponse(
+        items=[_to_response(l) for l in lanes],
+        totalItems=total,
+    )
+   
 
 @router.get("/{lane_id}", response_model=LaneResponse)
 async def get_lane(lane_id: str, db: Session = Depends(get_db)):

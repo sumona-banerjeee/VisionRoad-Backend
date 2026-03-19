@@ -136,7 +136,7 @@ def tilt_from_mask(mask: np.ndarray, box: tuple) -> float | None:
     # Get coordinates of non-zero (object) pixels
     ys, xs = np.nonzero(pole_mask)
     if len(xs) < MIN_MASK_PIXELS:
-        logger.debug(
+        logger.info(
             f"tilt_from_mask: only {len(xs)} mask pixels "
             f"(need {MIN_MASK_PIXELS}), skipping"
         )
@@ -148,7 +148,7 @@ def tilt_from_mask(mask: np.ndarray, box: tuple) -> float | None:
     vx, vy = float(line[0]), float(line[1])
 
     angle = compute_tilt_angle(vx, vy)
-    logger.debug(
+    logger.info(
         f"tilt_from_mask: vx={vx:.4f} vy={vy:.4f} → "
         f"angle={angle:.1f}° ({len(xs)} mask px)"
     )
@@ -185,7 +185,7 @@ def tilt_from_edges(pole_crop: np.ndarray) -> float | None:
     )
 
     if lines is None or len(lines) == 0:
-        logger.debug("tilt_from_edges: no lines detected by HoughLinesP")
+        logger.info("tilt_from_edges: no lines detected by HoughLinesP")
         return None
 
     # Find the most vertical line (smallest angle from vertical)
@@ -207,7 +207,7 @@ def tilt_from_edges(pole_crop: np.ndarray) -> float | None:
             best_angle = angle
 
     if best_angle is not None:
-        logger.debug(f"tilt_from_edges: best line angle = {best_angle:.1f}°")
+        logger.info(f"tilt_from_edges: best line angle = {best_angle:.1f}°")
 
     return best_angle
 
@@ -321,7 +321,7 @@ def analyze_pole_tilt(
         try:
             tilt_angle = tilt_from_mask(mask, box)
             if tilt_angle is not None:
-                logger.debug(
+                logger.info(
                     f"Pole tilt (mask method): {tilt_angle:.1f}°"
                 )
         except Exception as e:
@@ -334,7 +334,7 @@ def analyze_pole_tilt(
             pole_crop = extract_pole_region(frame, box)
             tilt_angle = tilt_from_edges(pole_crop)
             if tilt_angle is not None:
-                logger.debug(
+                logger.info(
                     f"Pole tilt (edge method): {tilt_angle:.1f}°"
                 )
         except Exception as e:
@@ -343,7 +343,7 @@ def analyze_pole_tilt(
 
     # ── Default if both methods fail ──────────────────────────────────────
     if tilt_angle is None:
-        logger.debug("Both tilt methods failed — defaulting to 0° (upright)")
+        logger.info("Both tilt methods failed — defaulting to 0° (upright)")
         tilt_angle = 0.0
 
     classification = classify_pole(tilt_angle)

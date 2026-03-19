@@ -34,7 +34,7 @@ from app.detectors.yolo.pole_tilt import analyze_pole_tilt
 logger = logging.getLogger(__name__)
 
 # Configuration
-MODEL_PATH = r"models\best-11m.pt"
+MODEL_PATH = r"models\all-with-drain.pt"
 TRACKER = "botsort.yaml"
 CONF_THRESHOLD = 0.50
 
@@ -50,6 +50,7 @@ ROAD_DAMAGE_CLASSES = {
     "pothole",
     "road_crack",
     "damaged_road_marking",
+    "drain_issue",
 }
 EXCLUDED_CLASSES = {"good_sign_board"}
 ALL_CLASSES = ROAD_DAMAGE_CLASSES | EXCLUDED_CLASSES
@@ -584,6 +585,7 @@ class YoloDetector(BaseDetector):
                                     "good_sign_board": len(
                                         counted_ids["good_sign_board"]
                                     ),
+                                    "drain_issue": len(counted_ids["drain_issue"]),
                                 },
                                 "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                                 "center": {"x": cx, "y": cy},
@@ -619,6 +621,7 @@ class YoloDetector(BaseDetector):
                             "unique_good_sign_board": len(
                                 counted_ids["good_sign_board"]
                             ),
+                            "unique_drain_issue": len(counted_ids["drain_issue"]),
                             "total_road_damage": sum(
                                 len(counted_ids[c]) for c in ROAD_DAMAGE_CLASSES
                             ),
@@ -699,6 +702,9 @@ class YoloDetector(BaseDetector):
             good_sign_board_list = self._get_class_list(
                 confirmed, "good_sign_board", gps_points, perf_timings
             )
+            drain_issue_list = self._get_class_list(
+                confirmed, "drain_issue", gps_points, perf_timings
+            )
 
             frames_with_detections = _frames_written
             detection_rate = (
@@ -731,6 +737,7 @@ class YoloDetector(BaseDetector):
                         counted_ids["damaged_road_marking"]
                     ),
                     "unique_good_sign_board": len(counted_ids["good_sign_board"]),
+                    "unique_drain_issue": len(counted_ids["drain_issue"]),
                     "total_road_damage": sum(
                         len(counted_ids[c]) for c in ROAD_DAMAGE_CLASSES
                     ),
@@ -763,6 +770,7 @@ class YoloDetector(BaseDetector):
                 "road_crack_list": road_crack_list,
                 "damaged_road_marking_list": damaged_road_marking_list,
                 "good_sign_board_list": good_sign_board_list,
+                "drain_issue_list": drain_issue_list,
                 # Read back streamed frames from NDJSON temp file
                 "frames": self._read_ndjson_frames(
                     _ndjson_fd, _ndjson_path, _frames_written
@@ -779,6 +787,7 @@ class YoloDetector(BaseDetector):
                 + road_crack_list
                 + damaged_road_marking_list
                 + good_sign_board_list
+                + drain_issue_list
             )
             self._save_to_db(video_id, all_detections_flat, perf_timings)
             process_end = time.time()

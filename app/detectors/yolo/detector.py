@@ -27,6 +27,7 @@ from app.core.logging_config import PerfTimer, perf_logger
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
+from app.models.video import Video
 from app.db.crud_hierarchy import find_chainage_by_gps
 from app.detectors.yolo.pole_tilt import analyze_pole_tilt
 
@@ -933,15 +934,27 @@ class YoloDetector(BaseDetector):
     def _save_to_db(self, video_id, all_detections, perf_timings=None):
         db = SessionLocal()
         try:
+            video = db.query(Video).filter(Video.id == video_id).first()
+            video_chainage_id = video.chainage_id if video else None
+            video_package_id = None
+            video_project_id = None
+            video_direction = None
+
+            if video_chainage_id and video.chainage:
+                video_package_id = video.chainage.package_id
+                video_direction = video.chainage.direction
+                if video.chainage.package:
+                    video_project_id = video.chainage.package.project_id
+
             db_detections = []
 
             for det in all_detections:
                 lat, lng = det.get("lat"), det.get("lng")
-                project_id, package_id, chainage_id = None, None, None
+                project_id, package_id, chainage_id = video_project_id, video_package_id, video_chainage_id
                 if lat and lng:
                     # ⏱ Time the GPS-based chainage DB lookup
                     _t0 = time.perf_counter()
-                    chainage = find_chainage_by_gps(db, lat, lng)
+                    chainage = find_chainage_by_gps(db, lat, lng, package_id=video_package_id, direction=video_direction)
                     _gps_db_elapsed = time.perf_counter() - _t0
                     if perf_timings is not None:
                         perf_timings["db_gps_match"]["total"] += _gps_db_elapsed

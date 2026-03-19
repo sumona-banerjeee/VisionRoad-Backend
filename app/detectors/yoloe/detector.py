@@ -36,9 +36,9 @@ from app.core.logging_config import PerfTimer, perf_logger
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
+from app.models.video import Video
 from app.db.crud_hierarchy import find_chainage_by_gps
 from app.helpers.yoloe_helper import (
-    load_yoloe_model,
     get_display_label,
     get_conf_threshold,
     check_signboard_pole_tilt,
@@ -729,13 +729,25 @@ class YoloeDetector(BaseDetector):
         """Save detections to database."""
         db = SessionLocal()
         try:
+            video = db.query(Video).filter(Video.id == video_id).first()
+            video_chainage_id = video.chainage_id if video else None
+            video_package_id = None
+            video_project_id = None
+            video_direction = None
+
+            if video_chainage_id and video.chainage:
+                video_package_id = video.chainage.package_id
+                video_direction = video.chainage.direction
+                if video.chainage.package:
+                    video_project_id = video.chainage.package.project_id
+
             db_detections = []
             for det in all_detections:
                 lat, lng = det.get("lat"), det.get("lng")
-                project_id, package_id, location_id = None, None, None
+                project_id, package_id, chainage_id = video_project_id, video_package_id, video_chainage_id
                 if lat and lng:
                     _t0 = time.perf_counter()
-                    location = find_chainage_by_gps(db, lat, lng)
+                    chainage = find_chainage_by_gps(db, lat, lng, package_id=video_package_id, direction=video_direction)
                     _gps_db_elapsed = time.perf_counter() - _t0
                     if perf_timings is not None:
                         perf_timings["db_gps_match"]["total"] += _gps_db_elapsed
@@ -743,13 +755,13 @@ class YoloeDetector(BaseDetector):
                     perf_logger.info(
                         f"[{video_id}] DB GPS match | {_gps_db_elapsed:.4f}s"
                         f" | lat={lat:.5f} lng={lng:.5f}"
-                        f" | {'HIT' if location else 'MISS'}"
+                        f" | {'HIT' if chainage else 'MISS'}"
                     )
-                    if location:
-                        location_id = location.id
-                        package_id = location.package_id
-                        if location.package:
-                            project_id = location.package.project_id
+                    if chainage:
+                        chainage_id = chainage.id
+                        package_id = chainage.package_id
+                        if chainage.package:
+                            project_id = chainage.package.project_id
 
                 db_det = Detection(
                     video_id=video_id,
@@ -762,7 +774,7 @@ class YoloeDetector(BaseDetector):
                     longitude=lng,
                     project_id=project_id,
                     package_id=package_id,
-                    location_id=location_id,
+                    chainage_id=chainage_id,
                 )
                 db_det.set_bounding_box(det.get("bbox", {}))
                 db_detections.append(db_det)

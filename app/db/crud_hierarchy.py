@@ -234,7 +234,7 @@ def delete_chainage(db: Session, chainage_id: str) -> bool:
 
 
 def find_chainage_by_gps(
-    db: Session, lat: float, lng: float, package_id: Optional[str] = None
+    db: Session, lat: float, lng: float, package_id: Optional[str] = None, direction: Optional[str] = None
 ) -> Optional[Chainage]:
     """
     Find chainage that contains the given GPS coordinates.
@@ -245,6 +245,7 @@ def find_chainage_by_gps(
         lat: Latitude coordinate
         lng: Longitude coordinate
         package_id: Optional package filter for faster lookup
+        direction: Optional direction filter (UP or DOWN)
 
     Returns:
         Chainage if found, None otherwise
@@ -262,5 +263,8 @@ def find_chainage_by_gps(
 
     if package_id:
         query = query.filter(Chainage.package_id == package_id)
+        
+    if direction:
+        query = query.filter(Chainage.direction == direction)
 
     return query.first()

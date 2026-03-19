@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 # Configuration
 MODEL_PATH = r"models\all-with-drain.pt"
 TRACKER = "botsort.yaml"
-CONF_THRESHOLD = 0.50
+# TEMP: lowered from 0.50 to catch more detections — raise back to 0.50 when done
+CONF_THRESHOLD = 0.30
 
 # Performance tuning
 FRAME_SKIP = int(os.getenv("FRAME_SKIP", "2"))  # Process every Nth frame (1=no skip)
@@ -475,18 +476,20 @@ class YoloDetector(BaseDetector):
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                         class_name = str(self.model.names[cid])
 
-                        if not (
-                            ROI_LEFT < cx < ROI_RIGHT and ROI_TOP < cy < ROI_BOTTOM
-                        ):
-                            rejection_stats["roi_outside"] += 1
-                            continue
+                        # TEMP: ROI filter disabled — comment back in to re-enable
+                        # if not (
+                        #     ROI_LEFT < cx < ROI_RIGHT and ROI_TOP < cy < ROI_BOTTOM
+                        # ):
+                        #     rejection_stats["roi_outside"] += 1
+                        #     continue
 
-                        if tid in tracker_class_lock:
-                            if tracker_class_lock[tid] != class_name:
-                                rejection_stats["class_mismatch"] += 1
-                                continue
-                        else:
-                            tracker_class_lock[tid] = class_name
+                        # TEMP: tracker class lock disabled — comment back in to re-enable
+                        # if tid in tracker_class_lock:
+                        #     if tracker_class_lock[tid] != class_name:
+                        #         rejection_stats["class_mismatch"] += 1
+                        #         continue
+                        # else:
+                        #     tracker_class_lock[tid] = class_name
 
                         tracker_history[tid].append(current_time)
                         _tid_last_seen[tid] = current_time
@@ -495,27 +498,31 @@ class YoloDetector(BaseDetector):
                             for t in tracker_history[tid]
                             if current_time - t <= DETECTION_TIME_WINDOW
                         ]
-                        min_needed = (
-                            1
-                            if conf >= HIGH_CONFIDENCE_THRESHOLD
-                            else LOW_CONFIDENCE_MIN_FRAMES
-                        )
+                        # TEMP: multi-frame threshold disabled — always allow on first frame
+                        # min_needed = (
+                        #     1
+                        #     if conf >= HIGH_CONFIDENCE_THRESHOLD
+                        #     else LOW_CONFIDENCE_MIN_FRAMES
+                        # )
+                        min_needed = 1  # TEMP: confirm on first frame regardless of confidence
 
                         if (
                             len(recent) >= min_needed
                             and tid not in confirmed
                             and tid not in rejected_tids
                         ):
-                            is_dup, _ = self.is_duplicate_location(
-                                cx,
-                                cy,
-                                (x1, y1, x2, y2),
-                                class_name,
-                                current_time,
-                                spatial_locations,
-                                TIME_THRESHOLD,
-                                MIN_DISTANCE_THRESHOLD,
-                            )
+                            # TEMP: spatial dedup disabled — comment back in to re-enable
+                            # is_dup, _ = self.is_duplicate_location(
+                            #     cx,
+                            #     cy,
+                            #     (x1, y1, x2, y2),
+                            #     class_name,
+                            #     current_time,
+                            #     spatial_locations,
+                            #     TIME_THRESHOLD,
+                            #     MIN_DISTANCE_THRESHOLD,
+                            # )
+                            is_dup = False  # TEMP: always False while dedup is disabled
                             if not is_dup:
                                 # Optimistic accept — confirm now, let verify callback check async
                                 _confirm_detection(
@@ -560,8 +567,8 @@ class YoloDetector(BaseDetector):
                                         "future": future,
                                         "class_name": class_copy,
                                     }
-                            else:
-                                rejection_stats["spatial_duplicate"] += 1
+                            # else:  # TEMP: disabled with spatial dedup
+                            #     rejection_stats["spatial_duplicate"] += 1
                         elif tid not in confirmed:
                             rejection_stats["multi_frame_pending"].add(tid)
 

@@ -22,6 +22,7 @@ from app.helpers.vl_helper import process_with_vl
 from app.helpers.sam3_helper import process_with_sam3
 from app.detectors.yoloe_trained_vl.detector import YoloeTrainedVlDetector
 from app.detectors.culvert.detector import CulvertDetector
+from app.detectors.combined.detector import CombinedDetector
 
 DETECTOR_REGISTRY = {
     "yolo":              lambda: YoloDetector(detection_mode="yolo"),
@@ -30,4 +31,5 @@ DETECTOR_REGISTRY = {
     "yoloe":             lambda: YoloeDetector(),
     "yoloe_trained_vl":  lambda: YoloeTrainedVlDetector(),
     "culvert_detection": lambda: CulvertDetector(detection_mode="culvert_detection"),
+    "combined":          lambda: CombinedDetector(),
 }

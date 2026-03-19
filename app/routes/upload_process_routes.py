@@ -34,11 +34,13 @@ async def upload_video(
     """Upload video and start background processing.
 
     detection_mode options (road hazard):
-      - yolo          : YOLO-only (fast, no VL verification)
-      - yolo_vl       : YOLO + VL verification (default)
-      - sam3          : YOLO + SAM3 verification
-      - yoloe         : YOLOE open-vocabulary detection (text-prompted)
-      - yoloe_trained_vl
+      - yolo             : YOLO-only (fast, no VL verification)
+      - yolo_vl          : YOLO + VL verification (default)
+      - sam3             : YOLO + SAM3 verification
+      - yoloe            : YOLOE open-vocabulary detection (text-prompted)
+      - yoloe_trained_vl : YOLOE fine-tuned + VL verification (all classes except drain)
+      - combined         : yoloe_trained_vl for all classes + YOLO for drain_issue only
+                           (single-pass dual-model; best overall coverage)
 
     Culvert detection:
       - culvert_detection : Culvert-specific model (culvert_best.pt) + BotSORT tracking.

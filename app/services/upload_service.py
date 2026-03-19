@@ -40,6 +40,7 @@ class DetectionMode(str, Enum):
     YOLOE = "yoloe"
     YOLOE_TRAINED_VL = "yoloe_trained_vl"
     CULVERT_DETECTION = "culvert_detection"
+    COMBINED = "combined"
 
 
 # Keep backward-compatible alias so other internal code can still import DetectionType

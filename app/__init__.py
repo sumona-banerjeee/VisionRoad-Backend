@@ -1,8 +1,10 @@
 import time
 import logging
 import builtins
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from app.routes.upload_process_routes import router as upload_router
 from app.routes.project_routes import router as project_router
@@ -56,6 +58,11 @@ def create_app():
         allow_headers=["*"],
     )
     api_prefix = "/api/v1"
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        logger.error(f"422 Validation Error on {request.url.path}: {exc.errors()} - Body: {exc.body}")
+        return JSONResponse({"detail": exc.errors()}, status_code=422)
 
     @app.get("/")
     async def root():

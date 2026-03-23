@@ -11,6 +11,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 import asyncio
 import json
+from typing import Optional
 from app.services.upload_service import UploadService, DetectionMode
 from app.ws.websocket_manager import manager
 from app.core.config import processing_status, detection_results, RESULTS_DIR
@@ -27,25 +28,11 @@ async def upload_video(
     file: UploadFile = File(...),
     json_file: UploadFile = File(...),
     detection_mode: DetectionMode = Form(DetectionMode.YOLO_VL),
-    speed_kmh: int = Form(30),
-    chainage_id: str = Form(None),
+    speed_kmh: Optional[int] = Form(30),
+    chainage_id: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
-    """Upload video and start background processing.
-
-    detection_mode options (road hazard):
-      - yolo          : YOLO-only (fast, no VL verification)
-      - yolo_vl       : YOLO + VL verification (default)
-      - sam3          : YOLO + SAM3 verification
-      - yoloe         : YOLOE open-vocabulary detection (text-prompted)
-      - yoloe_trained_vl
-
-    Culvert detection:
-      - culvert_detection : Culvert-specific model (culvert_best.pt) + BotSORT tracking.
-                            When this mode is selected the detection_mode field is
-                            ignored — CulvertDetector is always used.
-                            Classes: good_culvert · defective_culvert
-    """
+    """Upload video and start background processing."""
     return await upload_service.upload_video(
         file=file,
         json_file=json_file,

@@ -5,6 +5,9 @@ import uuid
 import asyncio
 import logging
 from enum import Enum
+import logging
+from enum import Enum
+from typing import Optional
 from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db import crud
@@ -40,6 +43,7 @@ class DetectionMode(str, Enum):
     YOLOE = "yoloe"
     YOLOE_TRAINED_VL = "yoloe_trained_vl"
     CULVERT_DETECTION = "culvert_detection"
+    GEMINI = "gemini"
 
 
 # Keep backward-compatible alias so other internal code can still import DetectionType
@@ -81,8 +85,8 @@ class UploadService:
         file: UploadFile,
         json_file: UploadFile,
         detection_mode: DetectionMode,
-        speed_kmh: int = 30,
-        chainage_id: str = None,
+        speed_kmh: Optional[int] = 30,
+        chainage_id: Optional[str] = None,
         db: Session = Depends(get_db),
     ):
         """Upload video and start background processing"""

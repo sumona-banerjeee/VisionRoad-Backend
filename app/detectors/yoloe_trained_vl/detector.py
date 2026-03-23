@@ -104,14 +104,13 @@ class YoloeTrainedVlDetector(YoloDetector):
         has_verify = self.verify_fn is not None
         cap = None
 
-        # ── Reset tracker state before each video ─────────────────────────────
+        # ── Reset tracker state before each video ───────────────────────────
         # persist=True keeps Kalman-filter/track-ID state across .track() calls.
         # Without a reset, IDs from the PREVIOUS video bleed into this run.
+        # Nulling the predictor forces Ultralytics to create a fresh predictor
+        # (and fresh BoTSORT tracker) on the very next .track() call.
         if hasattr(self.model, "predictor") and self.model.predictor is not None:
-            if hasattr(self.model.predictor, "trackers"):
-                self.model.predictor.trackers = None
-            if hasattr(self.model.predictor, "tracker"):
-                self.model.predictor.tracker = None
+            self.model.predictor = None
 
         try:
             asyncio.run_coroutine_threadsafe(

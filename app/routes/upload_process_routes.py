@@ -47,6 +47,12 @@ async def upload_video(
                             When this mode is selected the detection_mode field is
                             ignored — CulvertDetector is always used.
                             Classes: good_culvert · defective_culvert
+
+    Gemini video analysis:
+      - gemini_video      : Upload entire video to Gemini 1.5 for analysis.
+                            Returns timestamps, bounding boxes, frame snapshots,
+                            and labels for all road hazard categories.
+                            Requires GEMINI_API_KEY environment variable.
     """
     return await upload_service.upload_video(
         file=file,

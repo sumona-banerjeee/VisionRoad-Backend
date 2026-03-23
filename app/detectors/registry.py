@@ -24,6 +24,12 @@ from app.detectors.yoloe_trained_vl.detector import YoloeTrainedVlDetector
 from app.detectors.culvert.detector import CulvertDetector
 from app.detectors.combined.detector import CombinedDetector
 
+def _make_gemini_detector():
+    """Lazy import so the server boots even when google-genai is not installed."""
+    from app.detectors.gemini.detector import GeminiVideoDetector
+    return GeminiVideoDetector()
+
+
 DETECTOR_REGISTRY = {
     "yolo":              lambda: YoloDetector(detection_mode="yolo"),
     "yolo_vl":           lambda: YoloDetector(verify_fn=process_with_vl, detection_mode="yolo_vl"),
@@ -32,4 +38,5 @@ DETECTOR_REGISTRY = {
     "yoloe_trained_vl":  lambda: YoloeTrainedVlDetector(),
     "culvert_detection": lambda: CulvertDetector(detection_mode="culvert_detection"),
     "combined":          lambda: CombinedDetector(),
+    "gemini_video":      _make_gemini_detector,
 }

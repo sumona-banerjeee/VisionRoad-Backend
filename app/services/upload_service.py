@@ -32,6 +32,11 @@ class DetectionMode(str, Enum):
                           NOTE: the detection_mode field in the upload form is
                           ignored when this mode is chosen — CulvertDetector
                           is always used regardless of any additional mode header.
+
+    Gemini mode (all categories — video-level analysis):
+    - GEMINI_VIDEO      : Upload entire video to Gemini 1.5 for analysis.
+                          Returns timestamps, bounding boxes, and labels.
+                          Requires GEMINI_API_KEY environment variable.
     """
 
     YOLO = "yolo"
@@ -41,6 +46,7 @@ class DetectionMode(str, Enum):
     YOLOE_TRAINED_VL = "yoloe_trained_vl"
     CULVERT_DETECTION = "culvert_detection"
     COMBINED = "combined"
+    GEMINI_VIDEO = "gemini_video"
 
 
 # Keep backward-compatible alias so other internal code can still import DetectionType

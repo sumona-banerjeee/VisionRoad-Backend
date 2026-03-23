@@ -140,6 +140,16 @@ class YoloeDetector(BaseDetector):
         self, video_id: str, video_path: str, json_path: str, speed: int, loop
     ):
         cap = None
+
+        # ── Reset tracker state before each video ─────────────────────────────
+        # persist=True keeps Kalman-filter/track-ID state across .track() calls.
+        # Without a reset, IDs from the PREVIOUS video bleed into this run.
+        if hasattr(self.model, "predictor") and self.model.predictor is not None:
+            if hasattr(self.model.predictor, "trackers"):
+                self.model.predictor.trackers = None
+            if hasattr(self.model.predictor, "tracker"):
+                self.model.predictor.tracker = None
+
         try:
             asyncio.run_coroutine_threadsafe(
                 manager.send_message(

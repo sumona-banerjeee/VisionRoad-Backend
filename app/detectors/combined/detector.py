@@ -126,6 +126,18 @@ class CombinedDetector(YoloeTrainedVlDetector):
     ):
         has_verify = self.verify_fn is not None
         cap = None
+
+        # ── Reset tracker state for both models before processing ─────────────
+        # persist=True carries Kalman-filter state between .track() calls.
+        # Without a reset, IDs and trajectories from a PREVIOUS video bleed
+        # into this run, producing wrong class labels and huge track IDs.
+        for _m in (self.model, self.drain_model):
+            if hasattr(_m, "predictor") and _m.predictor is not None:
+                if hasattr(_m.predictor, "trackers"):
+                    _m.predictor.trackers = None
+                if hasattr(_m.predictor, "tracker"):
+                    _m.predictor.tracker = None
+
         try:
             asyncio.run_coroutine_threadsafe(
                 manager.send_message(

@@ -70,14 +70,14 @@ SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 DETECTION_PROMPT = """You are a road inspection AI analyzing dashcam video footage.
 
 Analyze the entire video and detect ALL occurrences of these road defect categories:
-- defected_sign_board
-- pothole
-- road_crack
-- damaged_road_marking
-- good_sign_board
-- drain_issue
-- defective_culvert
-- good_culvert
+- defected_sign_board   : official roadside traffic/direction sign (mounted on pole or gantry) that is damaged, faded, bent, or missing — NOT shop boards, banners, or building facades
+- pothole               : a bowl-shaped hole or cavity broken into the paved road surface — NOT shadows or painted markings
+- road_crack            : visible linear or alligator cracks in the asphalt or concrete pavement — NOT road edges or lane markings
+- damaged_road_marking  : faded, worn, or broken painted markings on the road surface (lane lines, arrows, crosswalks) — NOT unpainted road areas
+- good_sign_board       : official roadside traffic/direction sign in good condition, clearly legible, properly mounted — NOT shop boards, hoardings, or building signs
+- drain_issue           : roadside or carriageway drain that is blocked, broken, overflowing, or missing its grating cover
+- defective_culvert     : culvert under the road that is cracked, collapsed, blocked, or structurally damaged
+- good_culvert          : culvert that is intact, clear, and functioning normally
 
 For EACH detection, return its timestamp in MM:SS format, a bounding box, and a confidence level.
 
@@ -277,10 +277,11 @@ class GeminiVideoDetector:
                 # Frame number
                 frame_number = max(1, int(timestamp_sec * fps))
 
-                # Extract frame snapshot
-                snapshot_path = self._extract_snapshot(
-                    video_path, timestamp_sec, video_id, det_id
-                )
+                # Extract frame and refine bbox with YOLOE for tight pixel-level coordinates
+                snapshot_path = None
+                frame_bgr = self._get_frame_at_time(video_path, timestamp_sec)
+                if frame_bgr is not None:
+                    bbox = self._refine_bbox_with_yoloe(frame_bgr, bbox, label)
 
                 # GPS lookup
                 gps_coords = self._find_nearest_gps(timestamp_sec, gps_points)
@@ -324,6 +325,35 @@ class GeminiVideoDetector:
             )
 
             # ── 7. Assemble result JSON ───────────────────────────────────────
+            
+            # Group into frames array
+            frames_dict = {}
+            for info in confirmed.values():
+                f_id = info["first_detected_frame"]
+                if f_id not in frames_dict:
+                    frames_dict[f_id] = {
+                        "frame_id": f_id,
+                        "detections": []
+                    }
+                
+                bbox = info.get("bbox", {"x1": 0, "y1": 0, "x2": 0, "y2": 0})
+                det_entry = {
+                    "frame_id": f_id,
+                    "detection_id": info["detection_id"],
+                    "type": info["type"],
+                    "confidence": info["confidence"],
+                    "count": {c: len(counted_ids.get(c, set())) for c in DETECTION_CATEGORIES},
+                    "bbox": bbox,
+                    "center": {
+                        "x": (bbox["x1"] + bbox["x2"]) // 2,
+                        "y": (bbox["y1"] + bbox["y2"]) // 2
+                    },
+                    "area": max(0, bbox["x2"] - bbox["x1"]) * max(0, bbox["y2"] - bbox["y1"])
+                }
+                frames_dict[f_id]["detections"].append(det_entry)
+            
+            frames_list = [frames_dict[k] for k in sorted(frames_dict.keys())]
+
             results = {
                 "video_id": video_id,
                 "video_path": video_path,
@@ -358,6 +388,7 @@ class GeminiVideoDetector:
                 "drain_issue_list": class_lists["drain_issue"],
                 "defective_culvert_list": class_lists["defective_culvert"],
                 "good_culvert_list": class_lists["good_culvert"],
+                "frames": frames_list,
             }
 
             # Save to disk
@@ -430,13 +461,13 @@ class GeminiVideoDetector:
 
     @staticmethod
     def _parse_timestamp(ts: str) -> float:
-        """Convert MM:SS or HH:MM:SS to seconds."""
+        """Convert MM:SS or HH:MM:SS or MM:SS.mmm to seconds as float."""
         parts = ts.strip().split(":")
         try:
             if len(parts) == 2:
-                return int(parts[0]) * 60 + int(parts[1])
+                return float(parts[0]) * 60.0 + float(parts[1])
             elif len(parts) == 3:
-                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+                return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
         except (ValueError, IndexError):
             pass
         return 0.0
@@ -445,26 +476,41 @@ class GeminiVideoDetector:
     def _rescale_bbox(box_2d: list, width: int, height: int) -> dict:
         """
         Rescale Gemini's normalized [ymin, xmin, ymax, xmax] (0-1000)
-        to pixel coordinates {x1, y1, x2, y2}.
+        to pixel coordinates {x1, y1, x2, y2}, then expand by 2× (center-
+        preserving) so YOLOE has a generous search region around the object.
+        The result is clamped to the actual frame dimensions.
         """
         if not box_2d or len(box_2d) != 4:
             return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
 
         ymin, xmin, ymax, xmax = box_2d
+        px1 = int(xmin / 1000 * width)
+        py1 = int(ymin / 1000 * height)
+        px2 = int(xmax / 1000 * width)
+        py2 = int(ymax / 1000 * height)
+
+        # Expand 2× around the center (half-width/height doubled)
+        cx = (px1 + px2) / 2
+        cy = (py1 + py2) / 2
+        half_w = (px2 - px1)          # original half-width × 2 = full original width
+        half_h = (py2 - py1)          # original half-height × 2 = full original height
+
         return {
-            "x1": int(xmin / 1000 * width),
-            "y1": int(ymin / 1000 * height),
-            "x2": int(xmax / 1000 * width),
-            "y2": int(ymax / 1000 * height),
+            "x1": max(0, int(cx - half_w)),
+            "y1": max(0, int(cy - half_h)),
+            "x2": min(width,  int(cx + half_w)),
+            "y2": min(height, int(cy + half_h)),
         }
 
     @staticmethod
     def _extract_snapshot(
         video_path: str, timestamp_sec: float, video_id: str, det_id: int
     ) -> str | None:
-        """Extract a single frame from the video at the given timestamp and save as JPEG."""
-        snapshot_name = f"{video_id}_det_{det_id}.jpg"
-        snapshot_path = SNAPSHOT_DIR / snapshot_name
+        """DEPRECATED: Now handled inline with _get_frame_at_time for refinement."""
+        pass
+
+    @staticmethod
+    def _get_frame_at_time(video_path: str, timestamp_sec: float):
         try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
@@ -472,12 +518,155 @@ class GeminiVideoDetector:
             cap.set(cv2.CAP_PROP_POS_MSEC, timestamp_sec * 1000)
             ret, frame = cap.read()
             cap.release()
-            if ret:
-                cv2.imwrite(str(snapshot_path), frame)
-                return str(snapshot_path)
+            return frame if ret else None
         except Exception as e:
-            logger.warning(f"Failed to extract snapshot at {timestamp_sec}s: {e}")
-        return None
+            logger.warning(f"Failed to explicitly extract frame at {timestamp_sec}s: {e}")
+            return None
+
+    # ── Gemini class → YOLOE prompt keyword mapping ─────────────────────────────
+    # For bbox refinement, we don't need exact classification — just the right
+    # physical object type so YOLOE can locate it precisely in the frame.
+    GEMINI_TO_YOLOE_KEYWORDS = {
+        # FIX: removed 'board' (matches 'billboard') and 'traffic' (too generic)
+        # Only pure sign/signboard-shape prompts are accepted
+        "defected_sign_board": ["signboard", "circular traffic sign", "triangular", "prohibitory", "round"],
+        "good_sign_board":     ["signboard", "circular traffic sign", "triangular", "prohibitory", "round"],
+        # FIX: removed 'crack' and 'crumbling' — too likely to match entire-frame texture
+        "pothole":             ["pothole", "pothole with", "deep pothole", "shallow pothole", "multiple pothole"],
+        "road_crack":          ["crack", "pavement crack"],
+        "damaged_road_marking":["marking", "crosswalk", "faded road"],
+        # Classes below have no YOLOE prompts — refinement will be skipped
+        "drain_issue":         [],
+        "defective_culvert":   [],
+        "good_culvert":        [],
+    }
+
+    # Max fraction of frame area a YOLOE box may cover before being rejected
+    # (prevents whole-frame false-positives from being used as a bbox)
+    _YOLOE_MAX_BOX_AREA_FRACTION = 0.70
+
+    @staticmethod
+    def _refine_bbox_with_yoloe(frame_bgr, gemini_bbox: dict, target_class: str) -> dict:
+        """
+        Use the loaded YOLOv11m-Seg open-vocabulary model on a single frame 
+        to snap the bounding box to the perfect pixel boundaries of the object.
+        
+        Strategy:
+          1. Check if YOLOE has prompts that can locate this Gemini class
+          2. Run single-frame inference
+          3. For each YOLOE detection, check if its prompt contains any keyword
+             associated with the target Gemini class (lenient matching)
+          4. Pick the closest matching box to Gemini's center
+        """
+        from app.helpers.yoloe_helper import load_yoloe_model
+        
+        # Check if this Gemini class can be refined by YOLOE at all
+        match_keywords = GeminiVideoDetector.GEMINI_TO_YOLOE_KEYWORDS.get(target_class, [])
+        if not match_keywords:
+            logger.info(f"[YOLOE Refine] Skipping refinement for '{target_class}' — no YOLOE prompts available.")
+            return gemini_bbox
+        
+        logger.info(
+            f"[YOLOE Refine] Start: target_class='{target_class}', "
+            f"gemini_box=({gemini_bbox['x1']},{gemini_bbox['y1']})-({gemini_bbox['x2']},{gemini_bbox['y2']}), "
+            f"match_keywords={match_keywords}"
+        )
+        
+        try:
+            model = load_yoloe_model()
+            results = model.predict(frame_bgr, conf=0.10, verbose=False)
+            
+            r = results[0]
+            if r.boxes is None or len(r.boxes) == 0:
+                logger.warning("[YOLOE Refine] No detections found by YOLOE in this frame.")
+                return gemini_bbox
+
+            boxes = r.boxes.xyxy.cpu().numpy()
+            class_ids = r.boxes.cls.cpu().numpy().astype(int)
+            confs = r.boxes.conf.cpu().numpy()
+            names = r.names
+            
+            logger.info(f"[YOLOE Refine] YOLOE found {len(boxes)} detections in frame.")
+            
+            # Gemini bbox center (from the 2.5x expanded box)
+            gx_center = (gemini_bbox["x1"] + gemini_bbox["x2"]) / 2
+            gy_center = (gemini_bbox["y1"] + gemini_bbox["y2"]) / 2
+            
+            best_box = None
+            best_conf = 0.0
+            min_dist = float('inf')
+            best_prompt = ""
+            
+            for box, cls_id, conf in zip(boxes, class_ids, confs):
+                prompt_name = names.get(cls_id, "").lower()
+                
+                # Lenient matching: does this YOLOE prompt contain ANY keyword
+                # associated with the target Gemini category?
+                prompt_matches = any(kw in prompt_name for kw in match_keywords)
+                
+                if not prompt_matches:
+                    continue
+                
+                # Apply confidence threshold: stricter for sign boards
+                is_sign = "sign" in target_class
+                min_conf = 0.55 if is_sign else 0.10
+                if conf < min_conf:
+                    logger.info(
+                        f"[YOLOE Refine] Skipping '{prompt_name}' — "
+                        f"conf={conf:.2f} < threshold={min_conf}"
+                    )
+                    continue
+                
+                x1, y1, x2, y2 = map(int, box)
+
+                # FIX: Reject whole-frame boxes (YOLOE texture match on the whole image)
+                fh, fw = frame_bgr.shape[:2]
+                box_area_frac = ((x2 - x1) * (y2 - y1)) / (fw * fh)
+                max_frac = GeminiVideoDetector._YOLOE_MAX_BOX_AREA_FRACTION
+                if box_area_frac > max_frac:
+                    logger.info(
+                        f"[YOLOE Refine] Skipping '{prompt_name}' — "
+                        f"box covers {box_area_frac:.0%} of frame (> {max_frac:.0%} limit)"
+                    )
+                    continue
+
+                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                dist = (cx - gx_center)**2 + (cy - gy_center)**2
+                
+                logger.info(
+                    f"[YOLOE Refine] Candidate: prompt='{prompt_name}', "
+                    f"conf={conf:.2f}, box=({x1},{y1})-({x2},{y2}), "
+                    f"area={box_area_frac:.0%}, dist={dist:.0f}"
+                )
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    best_box = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                    best_conf = conf
+                    best_prompt = prompt_name
+            
+            # Accept if within ~632px radius (400,000 sq px)
+            if best_box and min_dist < 400000:
+                logger.info(
+                    f"[YOLOE Refine] ✅ SUCCESS: Replaced Gemini box with YOLOE box. "
+                    f"prompt='{best_prompt}', conf={best_conf:.2f}, dist={min_dist:.0f}"
+                )
+                return best_box
+            elif best_box:
+                logger.warning(
+                    f"[YOLOE Refine] ⚠ Match found but too far away "
+                    f"(dist={min_dist:.0f} > 400000). Keeping Gemini box."
+                )
+            else:
+                logger.warning(
+                    f"[YOLOE Refine] ✗ No YOLOE detection matched keywords "
+                    f"{match_keywords} for '{target_class}'. Keeping Gemini box."
+                )
+                
+        except Exception as e:
+            logger.error(f"[YOLOE Refine] Error: {e}", exc_info=True)
+            
+        return gemini_bbox
 
     @staticmethod
     def _find_nearest_gps(

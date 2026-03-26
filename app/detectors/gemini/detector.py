@@ -19,6 +19,7 @@ import time
 import asyncio
 import logging
 import bisect
+import yaml
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -66,39 +67,16 @@ CONFIDENCE_MAP = {
 SNAPSHOT_DIR = RESULTS_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Prompt ─────────────────────────────────────────────────────────────────────
-DETECTION_PROMPT = """You are a road inspection AI analyzing dashcam video footage.
 
-Analyze the entire video and detect ALL occurrences of these road defect categories:
-- defected_sign_board   : official roadside traffic/direction sign (mounted on pole or gantry) that is damaged, faded, bent, or missing — NOT shop boards, banners, or building facades
-- pothole               : a bowl-shaped hole or cavity broken into the paved road surface — NOT shadows or painted markings
-- road_crack            : visible linear or alligator cracks in the asphalt or concrete pavement — NOT road edges or lane markings
-- damaged_road_marking  : faded, worn, or broken painted markings on the road surface (lane lines, arrows, crosswalks) — NOT unpainted road areas
-- good_sign_board       : official roadside traffic/direction sign in good condition, clearly legible, properly mounted — NOT shop boards, hoardings, or building signs
-- drain_issue           : roadside or carriageway drain that is blocked, broken, overflowing, or missing its grating cover
-- defective_culvert     : culvert under the road that is cracked, collapsed, blocked, or structurally damaged
-- good_culvert          : culvert that is intact, clear, and functioning normally
-
-For EACH detection, return its timestamp in MM:SS format, a bounding box, and a confidence level.
-
-The bounding box should be in [ymin, xmin, ymax, xmax] format normalized to 0-1000.
-
-Return ONLY a JSON array. Each item must be:
-{
-  "timestamp": "MM:SS",
-  "label": "one of the categories above",
-  "box_2d": [ymin, xmin, ymax, xmax],
-  "confidence": "high" or "medium" or "low",
-  "description": "brief description of what was detected"
-}
-
-Rules:
-- Use ONLY the exact category names listed above.
-- Timestamps must be in MM:SS format.
-- box_2d values must be integers between 0 and 1000.
-- Do NOT explain anything outside the JSON array.
-- If no defects are found, return an empty array: []
-"""
+# ── Prompt (loaded from prompts.yaml next to this file) ───────────────────────
+_PROMPT_FILE = Path(__file__).parent / "prompts.yaml"
+try:
+    with _PROMPT_FILE.open(encoding="utf-8") as _f:
+        DETECTION_PROMPT: str = yaml.safe_load(_f)["detection_prompt"]
+    logger.debug(f"Loaded detection prompt from {_PROMPT_FILE}")
+except Exception as _e:
+    logger.error(f"Failed to load prompts.yaml: {_e}. Using fallback prompt.")
+    DETECTION_PROMPT = "Detect road defects in this dashcam video. Return ONLY a JSON array."
 
 
 def get_gemini_executor() -> ThreadPoolExecutor:
@@ -524,17 +502,25 @@ class GeminiVideoDetector:
             return None
 
     # ── Gemini class → YOLOE prompt keyword mapping ─────────────────────────────
-    # For bbox refinement, we don't need exact classification — just the right
-    # physical object type so YOLOE can locate it precisely in the frame.
+    # Keywords are substrings matched against YOLOE's free-text prompt labels.
+    # Expanded from real log analysis — add any new labels seen in the ↳ lines.
     GEMINI_TO_YOLOE_KEYWORDS = {
-        # FIX: removed 'board' (matches 'billboard') and 'traffic' (too generic)
-        # Only pure sign/signboard-shape prompts are accepted
-        "defected_sign_board": ["signboard", "circular traffic sign", "triangular", "prohibitory", "round"],
-        "good_sign_board":     ["signboard", "circular traffic sign", "triangular", "prohibitory", "round"],
-        # FIX: removed 'crack' and 'crumbling' — too likely to match entire-frame texture
+        "defected_sign_board": [
+            "signboard", "circular traffic sign", "triangular", "prohibitory", "round",
+            # observed in logs: model uses 'circular' standalone, 'erased', 'convex', etc.
+            "circular", "no parking", "erased", "convex", "rectangular road",
+            "faded triangular", "faded rectangular", "damaged triangle",
+        ],
+        "good_sign_board": [
+            "signboard", "circular traffic sign", "triangular", "prohibitory", "round",
+            "circular", "no parking", "rectangular road",
+        ],
+        # pothole: keep tight — 'aggregate'/'raveling' labels are road surface degradation NOT potholes
         "pothole":             ["pothole", "pothole with", "deep pothole", "shallow pothole", "multiple pothole"],
         "road_crack":          ["crack", "pavement crack"],
-        "damaged_road_marking":["marking", "crosswalk", "faded road"],
+        # disabled: YOLOE has no lane/crosswalk-marking prompts — all misses show
+        # 'aggregate', 'raveling', 'asphalt' labels which are NOT road markings.
+        "damaged_road_marking": [],
         # Classes below have no YOLOE prompts — refinement will be skipped
         "drain_issue":         [],
         "defective_culvert":   [],
@@ -548,7 +534,7 @@ class GeminiVideoDetector:
     @staticmethod
     def _refine_bbox_with_yoloe(frame_bgr, gemini_bbox: dict, target_class: str) -> dict:
         """
-        Use the loaded YOLOv11m-Seg open-vocabulary model on a single frame 
+        Use the loaded YOLOEv11m-Seg open-vocabulary model on a single frame 
         to snap the bounding box to the perfect pixel boundaries of the object.
         
         Strategy:
@@ -588,7 +574,7 @@ class GeminiVideoDetector:
             
             logger.info(f"[YOLOE Refine] YOLOE found {len(boxes)} detections in frame.")
             
-            # Gemini bbox center (from the 2.5x expanded box)
+            # Gemini bbox center (from the 2.0x expanded box)
             gx_center = (gemini_bbox["x1"] + gemini_bbox["x2"]) / 2
             gy_center = (gemini_bbox["y1"] + gemini_bbox["y2"]) / 2
             
@@ -609,7 +595,7 @@ class GeminiVideoDetector:
                 
                 # Apply confidence threshold: stricter for sign boards
                 is_sign = "sign" in target_class
-                min_conf = 0.55 if is_sign else 0.10
+                min_conf = 0.40 if is_sign else 0.10
                 if conf < min_conf:
                     logger.info(
                         f"[YOLOE Refine] Skipping '{prompt_name}' — "
@@ -661,6 +647,12 @@ class GeminiVideoDetector:
                 logger.warning(
                     f"[YOLOE Refine] ✗ No YOLOE detection matched keywords "
                     f"{match_keywords} for '{target_class}'. Keeping Gemini box."
+                )
+                # Log what YOLOE actually found — use this to expand keywords
+                all_labels = [names.get(int(c), "") for c in class_ids]
+                logger.warning(
+                    f"[YOLOE Refine]   ↳ YOLOE labels in this frame: {all_labels} "
+                    f"(confs: {[round(float(c),2) for c in confs]})"
                 )
                 
         except Exception as e:

@@ -1,15 +1,37 @@
 detection_prompt: |
-  You are a road inspection AI analyzing dashcam video footage.
+  You are a road inspection AI analyzing dashcam video footage for the National Highways Authority of India (NHAI).
 
   Analyze the entire video and detect ALL occurrences of these road defect categories:
-  - defected_sign_board   : official roadside traffic/direction sign (mounted on pole or gantry) that is damaged, faded, bent, or missing — NOT shop boards, banners, or building facades
-  - pothole               : a bowl-shaped hole or cavity broken into the paved road surface — NOT shadows or painted markings
-  - road_crack            : visible linear or alligator cracks in the asphalt or concrete pavement — NOT road edges or lane markings
-  - damaged_road_marking  : faded, worn, or broken painted markings on the road surface (lane lines, arrows, crosswalks) — NOT unpainted road areas
-  - good_sign_board       : official roadside traffic/direction sign in good condition, clearly legible, properly mounted — NOT shop boards, hoardings, or building signs
-  - drain_issue           : roadside or carriageway drain that is blocked, broken, overflowing, or missing its grating cover
-  - defective_culvert     : culvert under the road that is cracked, collapsed, blocked, or structurally damaged
-  - good_culvert          : culvert that is intact, clear, and functioning normally
+
+  - defected_sign_board: An OFFICIAL roadside traffic or direction sign (mounted on a pole or gantry) that shows ANY of these defects:
+      * Paint defaced, smeared, or scribbled over (even partially)
+      * Sign face faded, discoloured, or reflectivity lost
+      * Physical damage: bent, cracked, dented, or torn panel
+      * Sign tilted, leaning, or pole broken/missing
+      * Text or symbol no longer clearly legible
+      NOT: shop boards, hoardings, commercial banners, building name plates
+
+  - good_sign_board: An OFFICIAL roadside traffic or direction sign that meets ALL of these criteria:
+      * Sign face is clean, undamaged, and original paint intact (no smearing, graffiti, or defacement)
+      * Text and symbols are fully legible from road level
+      * Sign is upright and properly mounted on its pole or gantry
+      NOT: shop boards, hoardings, commercial banners, building name plates
+
+  - pothole: A bowl-shaped hole, cavity, or depression broken into the paved road surface. Look for:
+      * Dark irregular holes in asphalt with visible depth
+      * Broken or missing chunks of road surface
+      * Water pooling in a depression on the road
+      NOT: shadows, painted road markings, speed bumps, or road edges
+
+  - road_crack: Visible linear, branching, or alligator (map) cracks running through the asphalt or concrete pavement — NOT road edges or lane markings
+
+  - damaged_road_marking: Faded, worn, broken, or barely visible painted markings on the road surface (lane lines, arrows, crosswalks, chevrons) — NOT unpainted road areas
+
+  - drain_issue: A roadside or carriageway drain that is blocked, broken, collapsed, overflowing, or missing its grating cover
+
+  - defective_culvert: A culvert under the road that is cracked, collapsed, blocked, or shows structural damage
+
+  - good_culvert: A culvert that is intact, clear of debris, and functioning normally
 
   For EACH distinct object detection, determine the full duration of its appearance
   (start and end times). You MUST return the MIDDLE timestamp (exactly halfway between

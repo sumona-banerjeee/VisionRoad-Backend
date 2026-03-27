@@ -76,7 +76,9 @@ try:
     logger.debug(f"Loaded detection prompt from {_PROMPT_FILE}")
 except Exception as _e:
     logger.error(f"Failed to load prompts.yaml: {_e}. Using fallback prompt.")
-    DETECTION_PROMPT = "Detect road defects in this dashcam video. Return ONLY a JSON array."
+    DETECTION_PROMPT = (
+        "Detect road defects in this dashcam video. Return ONLY a JSON array."
+    )
 
 
 def get_gemini_executor() -> ThreadPoolExecutor:
@@ -101,9 +103,7 @@ class GeminiVideoDetector:
             )
         self.client = genai.Client(api_key=GEMINI_API_KEY)
         self.detection_mode = "gemini_video"
-        logger.info(
-            f"GeminiVideoDetector ready — model: {GEMINI_MODEL}"
-        )
+        logger.info(f"GeminiVideoDetector ready — model: {GEMINI_MODEL}")
 
     # ── Public interface (matches BaseDetector) ────────────────────────────────
 
@@ -128,9 +128,11 @@ class GeminiVideoDetector:
         self, video_id: str, video_path: str, json_path: str, speed: int, loop
     ):
         try:
-            self._send_ws(loop, video_id, {
-                "type": "status", "status": "processing", "progress": 0
-            })
+            self._send_ws(
+                loop,
+                video_id,
+                {"type": "status", "status": "processing", "progress": 0},
+            )
 
             process_start = time.time()
             gps_points = self._load_gps_data(json_path)
@@ -157,19 +159,21 @@ class GeminiVideoDetector:
 
             logger.info(f"Uploading video to Gemini Files API: {video_path}")
             uploaded_file = self.client.files.upload(file=video_path)
-            logger.info(f"File uploaded: name={uploaded_file.name}, state={uploaded_file.state}")
+            logger.info(
+                f"File uploaded: name={uploaded_file.name}, state={uploaded_file.state}"
+            )
 
             # Poll until active
-            self._send_progress(loop, video_id, 20, "Waiting for Gemini to process file...")
+            self._send_progress(
+                loop, video_id, 20, "Waiting for Gemini to process file..."
+            )
             while uploaded_file.state.name == "PROCESSING":
                 time.sleep(2)
                 uploaded_file = self.client.files.get(name=uploaded_file.name)
                 logger.debug(f"File state: {uploaded_file.state}")
 
             if uploaded_file.state.name == "FAILED":
-                raise Exception(
-                    f"Gemini file processing failed: {uploaded_file.state}"
-                )
+                raise Exception(f"Gemini file processing failed: {uploaded_file.state}")
 
             logger.info(f"File ready: {uploaded_file.name}")
 
@@ -191,7 +195,9 @@ class GeminiVideoDetector:
                     err_str = str(api_err)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                         # Parse retry delay from error if available
-                        retry_match = re.search(r'retry\w*\s*in\s*([\d.]+)', err_str, re.IGNORECASE)
+                        retry_match = re.search(
+                            r"retry\w*\s*in\s*([\d.]+)", err_str, re.IGNORECASE
+                        )
                         wait_secs = float(retry_match.group(1)) if retry_match else 60.0
                         wait_secs = max(wait_secs, 30.0)  # At least 30 seconds
 
@@ -201,13 +207,17 @@ class GeminiVideoDetector:
                                 f"retrying in {wait_secs:.0f}s..."
                             )
                             self._send_progress(
-                                loop, video_id, 45,
+                                loop,
+                                video_id,
+                                45,
                                 f"Rate limited — retrying in {int(wait_secs)}s "
-                                f"(attempt {attempt}/{MAX_RETRIES})..."
+                                f"(attempt {attempt}/{MAX_RETRIES})...",
                             )
                             time.sleep(wait_secs)
                         else:
-                            logger.error(f"Rate limited on final attempt ({attempt}/{MAX_RETRIES})")
+                            logger.error(
+                                f"Rate limited on final attempt ({attempt}/{MAX_RETRIES})"
+                            )
                             raise
                     else:
                         raise  # Non-rate-limit error — don't retry
@@ -286,10 +296,7 @@ class GeminiVideoDetector:
             class_lists = {}
             for cat in DETECTION_CATEGORIES:
                 class_lists[cat] = sorted(
-                    [
-                        info for info in confirmed.values()
-                        if info["type"] == cat
-                    ],
+                    [info for info in confirmed.values() if info["type"] == cat],
                     key=lambda x: x["first_detected_time"],
                 )
 
@@ -297,39 +304,42 @@ class GeminiVideoDetector:
             total_road_damage = sum(
                 len(counted_ids[c])
                 for c in [
-                    "defected_sign_board", "pothole", "road_crack",
-                    "damaged_road_marking", "drain_issue",
+                    "defected_sign_board",
+                    "pothole",
+                    "road_crack",
+                    "damaged_road_marking",
+                    "drain_issue",
                 ]
             )
 
             # ── 7. Assemble result JSON ───────────────────────────────────────
-            
+
             # Group into frames array
             frames_dict = {}
             for info in confirmed.values():
                 f_id = info["first_detected_frame"]
                 if f_id not in frames_dict:
-                    frames_dict[f_id] = {
-                        "frame_id": f_id,
-                        "detections": []
-                    }
-                
+                    frames_dict[f_id] = {"frame_id": f_id, "detections": []}
+
                 bbox = info.get("bbox", {"x1": 0, "y1": 0, "x2": 0, "y2": 0})
                 det_entry = {
                     "frame_id": f_id,
                     "detection_id": info["detection_id"],
                     "type": info["type"],
                     "confidence": info["confidence"],
-                    "count": {c: len(counted_ids.get(c, set())) for c in DETECTION_CATEGORIES},
+                    "count": {
+                        c: len(counted_ids.get(c, set())) for c in DETECTION_CATEGORIES
+                    },
                     "bbox": bbox,
                     "center": {
                         "x": (bbox["x1"] + bbox["x2"]) // 2,
-                        "y": (bbox["y1"] + bbox["y2"]) // 2
+                        "y": (bbox["y1"] + bbox["y2"]) // 2,
                     },
-                    "area": max(0, bbox["x2"] - bbox["x1"]) * max(0, bbox["y2"] - bbox["y1"])
+                    "area": max(0, bbox["x2"] - bbox["x1"])
+                    * max(0, bbox["y2"] - bbox["y1"]),
                 }
                 frames_dict[f_id]["detections"].append(det_entry)
-            
+
             frames_list = [frames_dict[k] for k in sorted(frames_dict.keys())]
 
             results = {
@@ -347,13 +357,19 @@ class GeminiVideoDetector:
                 },
                 "summary": {
                     "total_frames": total_frames,
-                    "unique_defected_sign_board": len(counted_ids["defected_sign_board"]),
+                    "unique_defected_sign_board": len(
+                        counted_ids["defected_sign_board"]
+                    ),
                     "unique_pothole": len(counted_ids["pothole"]),
                     "unique_road_crack": len(counted_ids["road_crack"]),
-                    "unique_damaged_road_marking": len(counted_ids["damaged_road_marking"]),
+                    "unique_damaged_road_marking": len(
+                        counted_ids["damaged_road_marking"]
+                    ),
                     "unique_good_sign_board": len(counted_ids["good_sign_board"]),
                     "unique_drain_issue": len(counted_ids["drain_issue"]),
-                    "unique_defective_culvert": len(counted_ids.get("defective_culvert", set())),
+                    "unique_defective_culvert": len(
+                        counted_ids.get("defective_culvert", set())
+                    ),
                     "unique_good_culvert": len(counted_ids.get("good_culvert", set())),
                     "total_road_damage": total_road_damage,
                     "total_detections": total_detections,
@@ -374,9 +390,7 @@ class GeminiVideoDetector:
             with open(RESULTS_DIR / f"{video_id}.json", "w") as f:
                 json.dump(results, f, indent=2)
 
-            logger.info(
-                f"Results saved: {total_detections} detections for {video_id}"
-            )
+            logger.info(f"Results saved: {total_detections} detections for {video_id}")
 
             # ── 8. Save to DB ─────────────────────────────────────────────────
             self._send_progress(loop, video_id, 90, "Saving to database...")
@@ -392,19 +406,23 @@ class GeminiVideoDetector:
 
             # ── 9. Complete ───────────────────────────────────────────────────
             processing_status[video_id] = {"status": "completed", "progress": 100}
-            self._send_ws(loop, video_id, {
-                "type": "complete",
-                "status": "completed",
-                "summary": results["summary"],
-            })
+            self._send_ws(
+                loop,
+                video_id,
+                {
+                    "type": "complete",
+                    "status": "completed",
+                    "summary": results["summary"],
+                },
+            )
             return results
 
         except Exception as e:
-            logger.error(f"GeminiVideoDetector error for {video_id}: {e}", exc_info=True)
+            logger.error(
+                f"GeminiVideoDetector error for {video_id}: {e}", exc_info=True
+            )
             processing_status[video_id] = {"status": "error", "message": str(e)}
-            self._send_ws(loop, video_id, {
-                "type": "error", "message": str(e)
-            })
+            self._send_ws(loop, video_id, {"type": "error", "message": str(e)})
             raise
 
         finally:
@@ -422,7 +440,7 @@ class GeminiVideoDetector:
     def _parse_response(raw_text: str) -> list:
         """Extract a JSON array from the Gemini response text."""
         # Try to find JSON array in the response
-        match = re.search(r'\[.*\]', raw_text, re.DOTALL)
+        match = re.search(r"\[.*\]", raw_text, re.DOTALL)
         if not match:
             logger.warning("No JSON array found in Gemini response")
             return []
@@ -445,7 +463,9 @@ class GeminiVideoDetector:
             if len(parts) == 2:
                 return float(parts[0]) * 60.0 + float(parts[1])
             elif len(parts) == 3:
-                return float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+                return (
+                    float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+                )
         except (ValueError, IndexError):
             pass
         return 0.0
@@ -470,13 +490,13 @@ class GeminiVideoDetector:
         # Expand 2× around the center (half-width/height doubled)
         cx = (px1 + px2) / 2
         cy = (py1 + py2) / 2
-        half_w = (px2 - px1)          # original half-width × 2 = full original width
-        half_h = (py2 - py1)          # original half-height × 2 = full original height
+        half_w = px2 - px1  # original half-width × 2 = full original width
+        half_h = py2 - py1  # original half-height × 2 = full original height
 
         return {
             "x1": max(0, int(cx - half_w)),
             "y1": max(0, int(cy - half_h)),
-            "x2": min(width,  int(cx + half_w)),
+            "x2": min(width, int(cx + half_w)),
             "y2": min(height, int(cy + half_h)),
         }
 
@@ -498,7 +518,9 @@ class GeminiVideoDetector:
             cap.release()
             return frame if ret else None
         except Exception as e:
-            logger.warning(f"Failed to explicitly extract frame at {timestamp_sec}s: {e}")
+            logger.warning(
+                f"Failed to explicitly extract frame at {timestamp_sec}s: {e}"
+            )
             return None
 
     # ── Gemini class → YOLOE prompt keyword mapping ─────────────────────────────
@@ -506,25 +528,47 @@ class GeminiVideoDetector:
     # Expanded from real log analysis — add any new labels seen in the ↳ lines.
     GEMINI_TO_YOLOE_KEYWORDS = {
         "defected_sign_board": [
-            "signboard", "circular traffic sign", "triangular", "prohibitory", "round",
+            "signboard",
+            "circular traffic sign",
+            "triangular",
+            "prohibitory",
+            "round",
             # observed in logs: model uses 'circular' standalone, 'erased', 'convex', etc.
-            "circular", "no parking", "erased", "convex", "rectangular road",
-            "faded triangular", "faded rectangular", "damaged triangle",
+            "circular",
+            "no parking",
+            "erased",
+            "convex",
+            "rectangular road",
+            "faded triangular",
+            "faded rectangular",
+            "damaged triangle",
         ],
         "good_sign_board": [
-            "signboard", "circular traffic sign", "triangular", "prohibitory", "round",
-            "circular", "no parking", "rectangular road",
+            "signboard",
+            "circular traffic sign",
+            "triangular",
+            "prohibitory",
+            "round",
+            "circular",
+            "no parking",
+            "rectangular road",
         ],
         # pothole: keep tight — 'aggregate'/'raveling' labels are road surface degradation NOT potholes
-        "pothole":             ["pothole", "pothole with", "deep pothole", "shallow pothole", "multiple pothole"],
-        "road_crack":          ["crack", "pavement crack"],
+        "pothole": [
+            "pothole",
+            "pothole with",
+            "deep pothole",
+            "shallow pothole",
+            "multiple pothole",
+        ],
+        "road_crack": ["crack", "pavement crack"],
         # disabled: YOLOE has no lane/crosswalk-marking prompts — all misses show
         # 'aggregate', 'raveling', 'asphalt' labels which are NOT road markings.
         "damaged_road_marking": [],
         # Classes below have no YOLOE prompts — refinement will be skipped
-        "drain_issue":         [],
-        "defective_culvert":   [],
-        "good_culvert":        [],
+        "drain_issue": [],
+        "defective_culvert": [],
+        "good_culvert": [],
     }
 
     # Max fraction of frame area a YOLOE box may cover before being rejected
@@ -532,11 +576,13 @@ class GeminiVideoDetector:
     _YOLOE_MAX_BOX_AREA_FRACTION = 0.70
 
     @staticmethod
-    def _refine_bbox_with_yoloe(frame_bgr, gemini_bbox: dict, target_class: str) -> dict:
+    def _refine_bbox_with_yoloe(
+        frame_bgr, gemini_bbox: dict, target_class: str
+    ) -> dict:
         """
-        Use the loaded YOLOEv11m-Seg open-vocabulary model on a single frame 
+        Use the loaded YOLOEv11m-Seg open-vocabulary model on a single frame
         to snap the bounding box to the perfect pixel boundaries of the object.
-        
+
         Strategy:
           1. Check if YOLOE has prompts that can locate this Gemini class
           2. Run single-frame inference
@@ -545,54 +591,60 @@ class GeminiVideoDetector:
           4. Pick the closest matching box to Gemini's center
         """
         from app.helpers.yoloe_helper import load_yoloe_model
-        
+
         # Check if this Gemini class can be refined by YOLOE at all
-        match_keywords = GeminiVideoDetector.GEMINI_TO_YOLOE_KEYWORDS.get(target_class, [])
+        match_keywords = GeminiVideoDetector.GEMINI_TO_YOLOE_KEYWORDS.get(
+            target_class, []
+        )
         if not match_keywords:
-            logger.info(f"[YOLOE Refine] Skipping refinement for '{target_class}' — no YOLOE prompts available.")
+            logger.info(
+                f"[YOLOE Refine] Skipping refinement for '{target_class}' — no YOLOE prompts available."
+            )
             return gemini_bbox
-        
+
         logger.info(
             f"[YOLOE Refine] Start: target_class='{target_class}', "
             f"gemini_box=({gemini_bbox['x1']},{gemini_bbox['y1']})-({gemini_bbox['x2']},{gemini_bbox['y2']}), "
             f"match_keywords={match_keywords}"
         )
-        
+
         try:
             model = load_yoloe_model()
             results = model.predict(frame_bgr, conf=0.10, verbose=False)
-            
+
             r = results[0]
             if r.boxes is None or len(r.boxes) == 0:
-                logger.warning("[YOLOE Refine] No detections found by YOLOE in this frame.")
+                logger.warning(
+                    "[YOLOE Refine] No detections found by YOLOE in this frame."
+                )
                 return gemini_bbox
 
             boxes = r.boxes.xyxy.cpu().numpy()
             class_ids = r.boxes.cls.cpu().numpy().astype(int)
             confs = r.boxes.conf.cpu().numpy()
             names = r.names
-            
+
             logger.info(f"[YOLOE Refine] YOLOE found {len(boxes)} detections in frame.")
-            
+
             # Gemini bbox center (from the 2.0x expanded box)
             gx_center = (gemini_bbox["x1"] + gemini_bbox["x2"]) / 2
             gy_center = (gemini_bbox["y1"] + gemini_bbox["y2"]) / 2
-            
+
             best_box = None
             best_conf = 0.0
-            min_dist = float('inf')
+            min_dist = float("inf")
             best_prompt = ""
-            
+
             for box, cls_id, conf in zip(boxes, class_ids, confs):
                 prompt_name = names.get(cls_id, "").lower()
-                
+
                 # Lenient matching: does this YOLOE prompt contain ANY keyword
                 # associated with the target Gemini category?
                 prompt_matches = any(kw in prompt_name for kw in match_keywords)
-                
+
                 if not prompt_matches:
                     continue
-                
+
                 # Apply confidence threshold: stricter for sign boards
                 is_sign = "sign" in target_class
                 min_conf = 0.40 if is_sign else 0.10
@@ -602,7 +654,7 @@ class GeminiVideoDetector:
                         f"conf={conf:.2f} < threshold={min_conf}"
                     )
                     continue
-                
+
                 x1, y1, x2, y2 = map(int, box)
 
                 # FIX: Reject whole-frame boxes (YOLOE texture match on the whole image)
@@ -617,20 +669,20 @@ class GeminiVideoDetector:
                     continue
 
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                dist = (cx - gx_center)**2 + (cy - gy_center)**2
-                
+                dist = (cx - gx_center) ** 2 + (cy - gy_center) ** 2
+
                 logger.info(
                     f"[YOLOE Refine] Candidate: prompt='{prompt_name}', "
                     f"conf={conf:.2f}, box=({x1},{y1})-({x2},{y2}), "
                     f"area={box_area_frac:.0%}, dist={dist:.0f}"
                 )
-                
+
                 if dist < min_dist:
                     min_dist = dist
                     best_box = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
                     best_conf = conf
                     best_prompt = prompt_name
-            
+
             # Accept if within ~632px radius (400,000 sq px)
             if best_box and min_dist < 400000:
                 logger.info(
@@ -654,16 +706,14 @@ class GeminiVideoDetector:
                     f"[YOLOE Refine]   ↳ YOLOE labels in this frame: {all_labels} "
                     f"(confs: {[round(float(c),2) for c in confs]})"
                 )
-                
+
         except Exception as e:
             logger.error(f"[YOLOE Refine] Error: {e}", exc_info=True)
-            
+
         return gemini_bbox
 
     @staticmethod
-    def _find_nearest_gps(
-        detection_time: float, gps_points: list
-    ) -> dict:
+    def _find_nearest_gps(detection_time: float, gps_points: list) -> dict:
         """Return the GPS point whose timestamp is closest to detection_time."""
         if not gps_points:
             return {"lat": None, "lng": None}
@@ -726,7 +776,9 @@ class GeminiVideoDetector:
 
                 if lat and lng:
                     chainage = find_chainage_by_gps(
-                        db, lat, lng,
+                        db,
+                        lat,
+                        lng,
                         package_id=video_package_id,
                         direction=video_direction,
                     )
@@ -768,11 +820,15 @@ class GeminiVideoDetector:
         processing_status[video_id]["status"] = "processing"
         if message:
             processing_status[video_id]["message"] = message
-        self._send_ws(loop, video_id, {
-            "type": "progress",
-            "progress": progress,
-            "message": message,
-        })
+        self._send_ws(
+            loop,
+            video_id,
+            {
+                "type": "progress",
+                "progress": progress,
+                "message": message,
+            },
+        )
 
     @staticmethod
     def _send_ws(loop, video_id: str, payload: dict):

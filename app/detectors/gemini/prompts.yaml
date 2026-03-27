@@ -11,13 +11,17 @@ detection_prompt: |
   - defective_culvert     : culvert under the road that is cracked, collapsed, blocked, or structurally damaged
   - good_culvert          : culvert that is intact, clear, and functioning normally
 
-  For EACH detection, provide:
-  - timestamp: the frame where the object is CLEAREST and most fully visible (use MM:SS.mmm format) — good lighting, unobstructed, fully in frame. Report each unique physical object only ONCE even if it appears across multiple frames.
-  - box_2d: a TIGHT bounding box in [ymin, xmin, ymax, xmax] format, normalized to 0–1000, drawn precisely around the object at that chosen frame — not around the whole scene
+  For EACH distinct object detection, determine the full duration of its appearance
+  (start and end times). You MUST return the MIDDLE timestamp (exactly halfway between
+  the start and end of its appearance) in MM:SS format. Provide a bounding box and a
+  confidence level corresponding to that MIDDLE frame.
+
+  - timestamp: the MIDDLE of the object's full appearance (halfway between first and last visible frame), in MM:SS format
+  - box_2d: a TIGHT bounding box in [ymin, xmin, ymax, xmax] format, normalized to 0–1000, drawn precisely around the object at that middle frame — not around the whole scene
 
   Return ONLY a JSON array. Each item must be:
   {
-    "timestamp": "MM:SS.mmm",
+    "timestamp": "MM:SS",
     "label": "one of the categories above",
     "box_2d": [ymin, xmin, ymax, xmax],
     "confidence": "high" or "medium" or "low",
@@ -26,9 +30,9 @@ detection_prompt: |
 
   Rules:
   - Use ONLY the exact category names listed above.
-  - Timestamps must be in MM:SS.mmm format (e.g. "00:40.250" means 40.25 seconds into the video).
-  - Pick the timestamp where the object is sharpest, best-lit, and fully visible — NOT when it first enters or exits the frame.
-  - Do NOT report the same physical object more than once.
+  - Timestamps must be in MM:SS format (e.g. "01:03" means 1 minute and 3 seconds into the video).
+  - You MUST calculate the exact middle point of the object's visibility and use that as the timestamp. Do NOT use the first time it appears.
   - box_2d values must be integers between 0 and 1000, tightly around just the object.
   - Do NOT explain anything outside the JSON array.
   - If no defects are found, return an empty array: []
+

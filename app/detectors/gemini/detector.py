@@ -635,6 +635,26 @@ class GeminiVideoDetector:
             min_dist = float("inf")
             best_prompt = ""
 
+            # Helper: compute intersection-over-union between two boxes
+            def _box_overlap(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) -> float:
+                ix1 = max(ax1, bx1)
+                iy1 = max(ay1, by1)
+                ix2 = min(ax2, bx2)
+                iy2 = min(ay2, by2)
+                inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                if inter == 0:
+                    return 0.0
+                area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+                area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+                return inter / (area_a + area_b - inter)
+
+            gx1, gy1, gx2, gy2 = (
+                gemini_bbox["x1"],
+                gemini_bbox["y1"],
+                gemini_bbox["x2"],
+                gemini_bbox["y2"],
+            )
+
             for box, cls_id, conf in zip(boxes, class_ids, confs):
                 prompt_name = names.get(cls_id, "").lower()
 
@@ -668,23 +688,38 @@ class GeminiVideoDetector:
                     )
                     continue
 
+                # FIX: Require spatial overlap with the Gemini search region.
+                # Without this, YOLOE can snap a detection to a completely different
+                # object in the same frame 
+                iou = _box_overlap(x1, y1, x2, y2, gx1, gy1, gx2, gy2)
+                if iou == 0.0:
+                    logger.info(
+                        f"[YOLOE Refine] Skipping '{prompt_name}' — "
+                        f"no overlap with Gemini box (IoU=0)"
+                    )
+                    continue
+
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                 dist = (cx - gx_center) ** 2 + (cy - gy_center) ** 2
 
                 logger.info(
                     f"[YOLOE Refine] Candidate: prompt='{prompt_name}', "
-                    f"conf={conf:.2f}, box=({x1},{y1})-({x2},{y2}), "
+                    f"conf={conf:.2f}, iou={iou:.2f}, box=({x1},{y1})-({x2},{y2}), "
                     f"area={box_area_frac:.0%}, dist={dist:.0f}"
                 )
 
-                if dist < min_dist:
+                # Among overlapping candidates, prefer highest confidence;
+                # use distance as a tiebreaker.
+                if best_box is None or conf > best_conf or (
+                    conf == best_conf and dist < min_dist
+                ):
                     min_dist = dist
                     best_box = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
                     best_conf = conf
                     best_prompt = prompt_name
 
-            # Accept if within ~632px radius (400,000 sq px)
-            if best_box and min_dist < 400000:
+            # Accept any overlapping box that passed all filters
+            if best_box:
                 logger.info(
                     f"[YOLOE Refine] ✅ SUCCESS: Replaced Gemini box with YOLOE box. "
                     f"prompt='{best_prompt}', conf={best_conf:.2f}, dist={min_dist:.0f}"

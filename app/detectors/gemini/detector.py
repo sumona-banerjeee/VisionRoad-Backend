@@ -66,38 +66,50 @@ CONFIDENCE_MAP = {
 SNAPSHOT_DIR = RESULTS_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Prompt ─────────────────────────────────────────────────────────────────────
-DETECTION_PROMPT = """You are a road inspection AI analyzing dashcam video footage.
+# ── Prompt System Instruction ──────────────────────────────────────────────────
+DETECTION_SYSTEM_INSTRUCTION = """You are a road maintenance inspector AI with expertise in computer vision.
+Your task is to analyze dashcam video footage and detect all occurrences of road defects and relevant infrastructure.
 
-Analyze the entire video and detect ALL occurrences of these road defect categories:
-- defected_sign_board
-- pothole
-- road_crack
-- damaged_road_marking
-- good_sign_board
-- drain_issue
-- defective_culvert
-- good_culvert
+Target categories and their visual characteristics:
+- pothole: Circular or irregular depressions/holes on the road surface.
+- road_crack: Longitudinal or transverse separations in the pavement surface.
+- damaged_road_marking: Faded, peeling, or missing white/yellow lane markings.
+- defected_sign_board: Tilting, bent, faded, or graffiti-covered road signs.
+- good_sign_board: Clear, upright, and legible road signs.
+- drain_issue: Blocked, broken, or overflowing road-side drainage systems.
+- defective_culvert: Structurally compromised small bridge/tunnel under the road.
+- good_culvert: Intact and functional small bridge/tunnel under the road.
 
-For EACH detection, return its timestamp in MM:SS format, a bounding box, and a confidence level.
+Your goal is to provide high-precision bounding boxes that TIGHTLY enclose the visible portion of the defect or object.
+"""
 
-The bounding box should be in [ymin, xmin, ymax, xmax] format normalized to 0-1000.
+DETECTION_TASK_PROMPT = """Analyze the entire dashcam video and identify ALL occurrences of the target categories.
 
-Return ONLY a JSON array. Each item must be:
-{
-  "timestamp": "MM:SS",
-  "label": "one of the categories above",
-  "box_2d": [ymin, xmin, ymax, xmax],
-  "confidence": "high" or "medium" or "low",
-  "description": "brief description of what was detected"
-}
+For EACH object, determine its full appearance duration.
+1. Find the exact MIDDLE timestamp of its appearance (exactly halfway between start and end).
+2. Write a brief 'spatial_reasoning' step describing exactly where the defect is located in the image frame (e.g., bottom-left, center, top-right).
+3. For that MIDDLE frame, identify the tightest possible bounding box based on your spatial reasoning. Output as [ymin, xmin, ymax, xmax] normalized to (0-1000).
+4. Assign a confidence rating (high, medium, low).
+5. Provide a very brief description of the defect or object.
 
 Rules:
-- Use ONLY the exact category names listed above.
-- Timestamps must be in MM:SS format.
-- box_2d values must be integers between 0 and 1000.
-- Do NOT explain anything outside the JSON array.
-- If no defects are found, return an empty array: []
+- Timestamps MUST be in MM:SS format.
+- Normalized coordinates MUST be integers [0-1000].
+- Bounding boxes should be conservative yet complete, covering the entire visible extent of the anomaly.
+- Return ONLY a JSON array of objects.
+- Ensure 'spatial_reasoning' appears BEFORE 'box_2d' in the JSON object to enable Chain of Thought.
+
+Output Format Example:
+[
+  {
+    "timestamp": "01:23",
+    "label": "pothole",
+    "description": "Medium-sized pothole in center lane",
+    "spatial_reasoning": "The pothole is directly in front of the camera, appearing in the lower-middle section of the frame.",
+    "box_2d": [750, 420, 880, 580],
+    "confidence": "high"
+  }
+]
 """
 
 
@@ -195,19 +207,26 @@ class GeminiVideoDetector:
 
             logger.info(f"File ready: {uploaded_file.name}")
 
-            # ── 3. Call Gemini generate_content (with retry for rate limits) ──
+            # ── 3. Call Gemini generate_content ─────────────────────────────
             self._send_progress(loop, video_id, 40, "Analyzing video with Gemini...")
 
-            logger.info("Sending generate_content request to Gemini...")
+            logger.info("Sending generate_content request to Gemini (with JSON mode)...")
 
             MAX_RETRIES = 3
             response = None
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
+                    # Using the new google-genai SDK 1.x features
                     response = self.client.models.generate_content(
                         model=GEMINI_MODEL,
-                        contents=[uploaded_file, DETECTION_PROMPT],
+                        contents=[uploaded_file, DETECTION_TASK_PROMPT],
+                        config=types.GenerateContentConfig(
+                            system_instruction=DETECTION_SYSTEM_INSTRUCTION,
+                            response_mime_type="application/json",
+                            temperature=0.0,  # Higher determinism for better grounding
+                        )
                     )
+                    break  # Success
                     break  # Success — exit retry loop
                 except Exception as api_err:
                     err_str = str(api_err)
@@ -234,7 +253,10 @@ class GeminiVideoDetector:
                     else:
                         raise  # Non-rate-limit error — don't retry
 
-            raw_text = response.text
+            if not response:
+                raise Exception("Failed to get response from Gemini after all retry attempts.")
+
+            raw_text = response.text or ""
             logger.info(f"Gemini response received ({len(raw_text)} chars)")
             logger.debug(f"Raw response: {raw_text[:500]}")
 
@@ -275,10 +297,10 @@ class GeminiVideoDetector:
                 description = det.get("description", "")
 
                 # Frame number
-                frame_number = max(1, int(timestamp_sec * fps))
+                frame_number = max(1, int(timestamp_sec * float(fps)))
 
                 # Extract frame snapshot
-                snapshot_path = self._extract_snapshot(
+                snapshot_path = self._extract_best_snapshot(
                     video_path, timestamp_sec, video_id, det_id
                 )
 
@@ -289,11 +311,12 @@ class GeminiVideoDetector:
                     "detection_id": det_id,
                     "type": label,
                     "first_detected_frame": frame_number,
-                    "first_detected_time": round(timestamp_sec, 2),
+                    "first_detected_time": float(f"{timestamp_sec:.2f}"),
                     "confidence": confidence,
                     "bbox": bbox,
                     "snapshot_path": snapshot_path,
                     "description": description,
+                    "spatial_reasoning": det.get("spatial_reasoning", ""),
                     "lat": gps_coords.get("lat"),
                     "lng": gps_coords.get("lng"),
                 }
@@ -331,8 +354,8 @@ class GeminiVideoDetector:
                 "processed_at": datetime.now().isoformat(),
                 "video_info": {
                     "total_frames": total_frames,
-                    "fps": round(fps, 2),
-                    "duration": round(video_duration, 2),
+                    "fps": float(f"{fps:.2f}"),
+                    "duration": float(f"{video_duration:.2f}"),
                     "width": width,
                     "height": height,
                     "resolution": f"{width}x{height}",
@@ -445,38 +468,71 @@ class GeminiVideoDetector:
     def _rescale_bbox(box_2d: list, width: int, height: int) -> dict:
         """
         Rescale Gemini's normalized [ymin, xmin, ymax, xmax] (0-1000)
-        to pixel coordinates {x1, y1, x2, y2}.
+        to pixel coordinates {x1, y1, x2, y2} and clamp to frame boundaries.
         """
         if not box_2d or len(box_2d) != 4:
             return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
 
-        ymin, xmin, ymax, xmax = box_2d
+        try:
+            ymin, xmin, ymax, xmax = map(float, box_2d)
+        except ValueError:
+            return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
+
+        # Clamp between 0 and 1000 to prevent out-of-bounds error
+        ymin = max(0.0, min(ymin, 1000.0))
+        xmin = max(0.0, min(xmin, 1000.0))
+        ymax = max(0.0, min(ymax, 1000.0))
+        xmax = max(0.0, min(xmax, 1000.0))
+
+        # Ensure valid rect
+        if ymin >= ymax or xmin >= xmax:
+            return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
+
         return {
-            "x1": int(xmin / 1000 * width),
-            "y1": int(ymin / 1000 * height),
-            "x2": int(xmax / 1000 * width),
-            "y2": int(ymax / 1000 * height),
+            "x1": int((xmin / 1000.0) * width),
+            "y1": int((ymin / 1000.0) * height),
+            "x2": int((xmax / 1000.0) * width),
+            "y2": int((ymax / 1000.0) * height),
         }
 
     @staticmethod
-    def _extract_snapshot(
+    def _extract_best_snapshot(
         video_path: str, timestamp_sec: float, video_id: str, det_id: int
     ) -> str | None:
-        """Extract a single frame from the video at the given timestamp and save as JPEG."""
-        snapshot_name = f"{video_id}_det_{det_id}.jpg"
-        snapshot_path = SNAPSHOT_DIR / snapshot_name
+        """Extract the sharpest frame around the given timestamp (±0.5 sec) and save as JPEG."""
         try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 return None
-            cap.set(cv2.CAP_PROP_POS_MSEC, timestamp_sec * 1000)
-            ret, frame = cap.read()
+
+            best_frame = None
+            best_score = -1
+
+            # search ±0.5 sec
+            for offset in [-0.5, -0.25, 0.0, 0.25, 0.5]:
+                t = max(0.0, timestamp_sec + offset)
+                cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+
+                # simple heuristic: choose sharpest frame
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                score = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+                if score > best_score:
+                    best_score = score
+                    best_frame = frame
+
             cap.release()
-            if ret:
-                cv2.imwrite(str(snapshot_path), frame)
+
+            if best_frame is not None:
+                snapshot_name = f"{video_id}_det_{det_id}.jpg"
+                snapshot_path = SNAPSHOT_DIR / snapshot_name
+                cv2.imwrite(str(snapshot_path), best_frame)
                 return str(snapshot_path)
         except Exception as e:
-            logger.warning(f"Failed to extract snapshot at {timestamp_sec}s: {e}")
+            logger.warning(f"Failed to extract snapshot around {timestamp_sec}s: {e}")
         return None
 
     @staticmethod

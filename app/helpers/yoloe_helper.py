@@ -325,7 +325,7 @@ def load_yoloe_model() -> YOLOE:
                 model = YOLOE(YOLOE_MODEL_WEIGHTS)
                 model.set_classes(PROMPTS)
                 logger.info(
-                    f"✅ YOLOE model loaded in {time.time() - t0:.1f}s — "
+                    f"YOLOE model loaded in {time.time() - t0:.1f}s — "
                     f"{NUM_TARGET_CLASSES} prompts set"
                 )
                 # Warmup

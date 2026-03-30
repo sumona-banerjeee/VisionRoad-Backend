@@ -91,7 +91,7 @@ def load_yoloe_trained_model() -> YOLO:
                 t0 = time.time()
                 model = YOLO(YOLOE_TRAINED_MODEL_PATH)
                 logger.info(
-                    f"✅ Trained YOLOE model loaded in {time.time() - t0:.1f}s — "
+                    f"Trained YOLOE model loaded in {time.time() - t0:.1f}s — "
                     f"{len(TRAINED_CLASSES)} classes"
                 )
                 # Warmup

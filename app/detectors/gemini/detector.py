@@ -1,17 +1,4 @@
-"""
-GeminiVideoDetector — Gemini 1.5 based video road-inspection detection with YOLOE-seg hybrid refinement.
-
-Instead of frame-by-frame YOLO inference, this detector:
-  1. Uploads the whole video to the Gemini Files API.
-  2. Sends a single generate_content() call with a structured prompt.
-  3. Parses the JSON response (timestamps, labels, bounding boxes).
-  4. Extracts the sharpest frame snapshot around each detection timestamp.
-  5. Runs YOLOE segmentation on that frame to get precise masks and boxes.
-  6. Maps timestamps to GPS coords and saves results in the standard format.
-
-Does NOT inherit BaseDetector (which is YOLO-specific).
-"""
-
+import numpy as np
 import cv2
 import json
 import re
@@ -20,25 +7,23 @@ import time
 import asyncio
 import logging
 import bisect
-import numpy as np
+import yaml
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
 from google import genai
-from google.genai import types
 
 from app.ws.websocket_manager import manager
 from app.core.config import processing_status, detection_results, RESULTS_DIR
-from app.core.logging_config import perf_logger
 from app.db.database import SessionLocal
 from app.db import crud
 from app.models.detection import Detection
 from app.models.video import Video
 from app.db.crud_hierarchy import find_chainage_by_gps
-from app.helpers.yoloe_helper import load_yoloe_model, process_frame_with_yoloe
 
 logger = logging.getLogger(__name__)
+from app.core.logging_config import perf_logger
 
 # Shared background executor
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gemini_proc")
@@ -70,51 +55,18 @@ CONFIDENCE_MAP = {
 SNAPSHOT_DIR = RESULTS_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Prompt System Instruction ──────────────────────────────────────────────────
-DETECTION_SYSTEM_INSTRUCTION = """You are a road maintenance inspector AI with expertise in computer vision.
-Your task is to analyze dashcam video footage and detect all occurrences of road defects and relevant infrastructure.
 
-Target categories and their visual characteristics:
-- pothole: Circular or irregular depressions/holes on the road surface.
-- road_crack: Longitudinal or transverse separations in the pavement surface.
-- damaged_road_marking: Faded, peeling, or missing white/yellow lane markings.
-- defected_sign_board: Tilting, bent, faded, or graffiti-covered road signs.
-- good_sign_board: Clear, upright, and legible road signs.
-- drain_issue: Blocked, broken, or overflowing road-side drainage systems.
-- defective_culvert: Structurally compromised small bridge/tunnel under the road.
-- good_culvert: Intact and functional small bridge/tunnel under the road.
-
-Your goal is to provide high-precision bounding boxes that TIGHTLY enclose the visible portion of the defect or object.
-"""
-
-DETECTION_TASK_PROMPT = """Analyze the entire dashcam video and identify ALL occurrences of the target categories.
-
-For EACH object, determine its full appearance duration.
-1. Find the exact MIDDLE timestamp of its appearance (exactly halfway between start and end).
-2. Write a brief 'spatial_reasoning' step describing exactly where the defect is located in the image frame (e.g., bottom-left, center, top-right).
-3. For that MIDDLE frame, identify the tightest possible bounding box based on your spatial reasoning. Output as [ymin, xmin, ymax, xmax] normalized to (0-1000).
-4. Assign a confidence rating (high, medium, low).
-5. Provide a very brief description of the defect or object.
-
-Rules:
-- Timestamps MUST be in MM:SS format.
-- Normalized coordinates MUST be integers [0-1000].
-- Bounding boxes should be conservative yet complete, covering the entire visible extent of the anomaly.
-- Return ONLY a JSON array of objects.
-- Ensure 'spatial_reasoning' appears BEFORE 'box_2d' in the JSON object to enable Chain of Thought.
-
-Output Format Example:
-[
-  {
-    "timestamp": "01:23",
-    "label": "pothole",
-    "description": "Medium-sized pothole in center lane",
-    "spatial_reasoning": "The pothole is directly in front of the camera, appearing in the lower-middle section of the frame.",
-    "box_2d": [750, 420, 880, 580],
-    "confidence": "high"
-  }
-]
-"""
+# ── Prompt (loaded from prompts.yaml next to this file) ───────────────────────
+_PROMPT_FILE = Path(__file__).parent / "prompts.yaml"
+try:
+    with _PROMPT_FILE.open(encoding="utf-8") as _f:
+        DETECTION_PROMPT: str = yaml.safe_load(_f)["detection_prompt"]
+    logger.debug(f"Loaded detection prompt from {_PROMPT_FILE}")
+except Exception as _e:
+    logger.error(f"Failed to load prompts.yaml: {_e}. Using fallback prompt.")
+    DETECTION_PROMPT = (
+        "Detect road defects in this dashcam video. Return ONLY a JSON array."
+    )
 
 
 def get_gemini_executor() -> ThreadPoolExecutor:
@@ -124,7 +76,11 @@ def get_gemini_executor() -> ThreadPoolExecutor:
 
 class GeminiVideoDetector:
     """
-    Video-level road inspection detector using Gemini 1.5 + YOLOE-seg refinement.
+    Video-level road inspection detector using Gemini 1.5.
+
+    Implements the same interface as BaseDetector subclasses:
+      - process_video(video_id, video_path, json_path, speed_kmh)
+      - _process_video_blocking(video_id, video_path, json_path, speed, loop)
     """
 
     def __init__(self):
@@ -134,16 +90,8 @@ class GeminiVideoDetector:
                 "Please set it in your .env file."
             )
         self.client = genai.Client(api_key=GEMINI_API_KEY)
-        self.yoloe_model = None
-        self.detection_mode = "gemini_yoloe_hybrid"
-        logger.info(
-            f"GeminiVideoDetector ready — model: {GEMINI_MODEL} + YOLOE"
-        )
-
-    def _ensure_yoloe_model(self):
-        """Ensure the YOLOE model is loaded."""
-        if self.yoloe_model is None:
-            self.yoloe_model = load_yoloe_model()
+        self.detection_mode = "gemini_video"
+        logger.info(f"GeminiVideoDetector ready — model: {GEMINI_MODEL}")
 
     # ── Public interface (matches BaseDetector) ────────────────────────────────
 
@@ -168,12 +116,21 @@ class GeminiVideoDetector:
         self, video_id: str, video_path: str, json_path: str, speed: int, loop
     ):
         try:
-            self._ensure_yoloe_model()
-            self._send_ws(loop, video_id, {
-                "type": "status", "status": "processing", "progress": 0
-            })
+            self._send_ws(
+                loop,
+                video_id,
+                {"type": "status", "status": "processing", "progress": 0},
+            )
 
             process_start = time.time()
+            # ── Perf accumulators ─────────────────────────────────────────────
+            _t_upload       = 0.0   # file upload + Gemini processing poll
+            _t_gemini_api   = 0.0   # generate_content call
+            _t_window_scan  = 0.0   # _find_best_frame_in_window total
+            _t_gps          = 0.0   # GPS nearest-point lookups
+            _t_db           = 0.0   # DB save
+            _n_window_scan  = 0     # number of detections processed
+            _n_gps          = 0
             gps_points = self._load_gps_data(json_path)
 
             # ── 1. Get video metadata via OpenCV ──────────────────────────────
@@ -197,48 +154,51 @@ class GeminiVideoDetector:
             self._send_progress(loop, video_id, 10, "Uploading video to Gemini...")
 
             logger.info(f"Uploading video to Gemini Files API: {video_path}")
+            _t0 = time.perf_counter()
             uploaded_file = self.client.files.upload(file=video_path)
-            logger.info(f"File uploaded: name={uploaded_file.name}, state={uploaded_file.state}")
+            logger.info(
+                f"File uploaded: name={uploaded_file.name}, state={uploaded_file.state}"
+            )
 
             # Poll until active
-            self._send_progress(loop, video_id, 20, "Waiting for Gemini to process file...")
+            self._send_progress(
+                loop, video_id, 20, "Waiting for Gemini to process file..."
+            )
             while uploaded_file.state.name == "PROCESSING":
                 time.sleep(2)
                 uploaded_file = self.client.files.get(name=uploaded_file.name)
                 logger.debug(f"File state: {uploaded_file.state}")
+            _t_upload = time.perf_counter() - _t0
 
             if uploaded_file.state.name == "FAILED":
-                raise Exception(
-                    f"Gemini file processing failed: {uploaded_file.state}"
-                )
+                raise Exception(f"Gemini file processing failed: {uploaded_file.state}")
 
             logger.info(f"File ready: {uploaded_file.name}")
 
-            # ── 3. Call Gemini generate_content ─────────────────────────────
+            # ── 3. Call Gemini generate_content (with retry for rate limits) ──
             self._send_progress(loop, video_id, 40, "Analyzing video with Gemini...")
 
-            logger.info("Sending generate_content request to Gemini (with JSON mode)...")
+            logger.info("Sending generate_content request to Gemini...")
 
             MAX_RETRIES = 3
             response = None
+            _t0 = time.perf_counter()
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
                     response = self.client.models.generate_content(
                         model=GEMINI_MODEL,
-                        contents=[uploaded_file, DETECTION_TASK_PROMPT],
-                        config=types.GenerateContentConfig(
-                            system_instruction=DETECTION_SYSTEM_INSTRUCTION,
-                            response_mime_type="application/json",
-                            temperature=0.0,
-                        )
+                        contents=[uploaded_file, DETECTION_PROMPT],
                     )
-                    break 
+                    break  # Success — exit retry loop
                 except Exception as api_err:
                     err_str = str(api_err)
                     if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        retry_match = re.search(r'retry\w*\s*in\s*([\d.]+)', err_str, re.IGNORECASE)
+                        # Parse retry delay from error if available
+                        retry_match = re.search(
+                            r"retry\w*\s*in\s*([\d.]+)", err_str, re.IGNORECASE
+                        )
                         wait_secs = float(retry_match.group(1)) if retry_match else 60.0
-                        wait_secs = max(wait_secs, 30.0)
+                        wait_secs = max(wait_secs, 30.0)  # At least 30 seconds
 
                         if attempt < MAX_RETRIES:
                             logger.warning(
@@ -246,22 +206,26 @@ class GeminiVideoDetector:
                                 f"retrying in {wait_secs:.0f}s..."
                             )
                             self._send_progress(
-                                loop, video_id, 45,
+                                loop,
+                                video_id,
+                                45,
                                 f"Rate limited — retrying in {int(wait_secs)}s "
-                                f"(attempt {attempt}/{MAX_RETRIES})..."
+                                f"(attempt {attempt}/{MAX_RETRIES})...",
                             )
                             time.sleep(wait_secs)
                         else:
+                            logger.error(
+                                f"Rate limited on final attempt ({attempt}/{MAX_RETRIES})"
+                            )
                             raise
                     else:
-                        raise
+                        raise  # Non-rate-limit error — don't retry
 
-            if not response:
-                raise Exception("Failed to get response from Gemini after all retry attempts.")
-
-            raw_text = response.text or ""
+            _t_gemini_api = time.perf_counter() - _t0
+            raw_text = response.text
             logger.info(f"Gemini response received ({len(raw_text)} chars)")
-            
+            logger.debug(f"Raw response: {raw_text[:500]}")
+
             self._send_progress(loop, video_id, 60, "Parsing detections...")
 
             # ── 4. Parse JSON from response ───────────────────────────────────
@@ -269,7 +233,7 @@ class GeminiVideoDetector:
             logger.info(f"Parsed {len(detections)} detections from Gemini response")
 
             # ── 5. Process detections ─────────────────────────────────────────
-            self._send_progress(loop, video_id, 70, "Refining with YOLOE segmentation...")
+            self._send_progress(loop, video_id, 70, "Extracting frame snapshots...")
 
             confirmed = {}
             counted_ids = {cat: set() for cat in DETECTION_CATEGORIES}
@@ -278,64 +242,73 @@ class GeminiVideoDetector:
             for det in detections:
                 label = det.get("label", "").strip()
                 if label not in DETECTION_CATEGORIES:
+                    logger.warning(f"Skipping unknown label: {label}")
                     continue
 
                 det_id += 1
                 timestamp_str = det.get("timestamp", "00:00")
                 timestamp_sec = self._parse_timestamp(timestamp_str)
+
+                # Clamp to video duration
                 timestamp_sec = min(timestamp_sec, video_duration)
 
-                # Gemini's box
-                box_2d = det.get("box_2d", [0, 0, 1000, 1000])
+                point = det.get("point")
+                if point and isinstance(point, list) and len(point) == 2:
+                    y, x = point
+                    # Create a 150x150 box centered on the point (normalized 0-1000)
+                    # This provides enough context for YOLOE window scan to refine it.
+                    box_2d = [max(0, y - 75), max(0, x - 75), min(1000, y + 75), min(1000, x + 75)]
+                else:
+                    box_2d = det.get("box_2d", [0, 0, 1000, 1000])
+
                 bbox = self._rescale_bbox(box_2d, width, height)
 
-                # Extract best sharp frame
-                snapshot_result = self._extract_best_snapshot(
-                    video_path, timestamp_sec, video_id, det_id
-                )
-                
+                # Confidence
+                conf_str = det.get("confidence", "medium").lower()
+                confidence = CONFIDENCE_MAP.get(conf_str, 0.75)
+
+                description = det.get("description", "")
+
+                # Scan a ±1 s window to find the frame where YOLOE is most
+                # confident the target object is visible.  Gemini timestamps
+                # are whole-second resolution so the actual peak frame can be
+                # up to ~1 s away from the reported timestamp.
                 snapshot_path = None
-                frame = None
-                if snapshot_result:
-                    snapshot_path, frame = snapshot_result
+                _t0 = time.perf_counter()
+                best_frame_bgr, best_bbox, best_ts, best_mask = self._find_best_frame_in_window(
+                    video_path, timestamp_sec, bbox, label, video_duration
+                )
+                _t_window_scan += time.perf_counter() - _t0
+                _n_window_scan += 1
 
-                # YOLOE Refinement
-                mask = None
-                if frame is not None:
-                    yoloe_dets = process_frame_with_yoloe(self.yoloe_model, frame)
-                    # Find best IoU match
-                    best_match = None
-                    max_iou = 0.3 # threshold for matching
-                    
-                    for y_det in yoloe_dets:
-                        iou = self._calculate_iou(bbox, y_det["bbox"])
-                        if iou > max_iou:
-                            max_iou = iou
-                            best_match = y_det
-                    
-                    if best_match:
-                        logger.info(f"YOLOE match for {label} (IoU={max_iou:.2f})")
-                        x1, y1, x2, y2 = best_match["bbox"]
-                        bbox = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
-                        mask = best_match.get("mask")
+                if best_frame_bgr is not None:
+                    bbox = best_bbox
+                    timestamp_sec = best_ts
+                    mask = best_mask
+                else:
+                    mask = None
 
-                confidence = CONFIDENCE_MAP.get(det.get("confidence", "medium").lower(), 0.75)
-                frame_number = max(1, int(timestamp_sec * float(fps)))
+                # Frame number derived from the winning timestamp
+                frame_number = max(1, int(timestamp_sec * fps))
+
+                # GPS lookup
+                _t0 = time.perf_counter()
                 gps_coords = self._find_nearest_gps(timestamp_sec, gps_points)
+                _t_gps += time.perf_counter() - _t0
+                _n_gps += 1
 
                 confirmed[det_id] = {
                     "detection_id": det_id,
                     "type": label,
                     "first_detected_frame": frame_number,
-                    "first_detected_time": float(f"{timestamp_sec:.2f}"),
+                    "first_detected_time": round(timestamp_sec, 2),
                     "confidence": confidence,
                     "bbox": bbox,
+                    "segmentation_mask": mask,
                     "snapshot_path": snapshot_path,
-                    "description": det.get("description", ""),
-                    "spatial_reasoning": det.get("spatial_reasoning", ""),
+                    "description": description,
                     "lat": gps_coords.get("lat"),
                     "lng": gps_coords.get("lng"),
-                    "mask": mask,
                 }
 
                 if label in counted_ids:
@@ -354,26 +327,41 @@ class GeminiVideoDetector:
             total_detections = len(confirmed)
             total_road_damage = sum(
                 len(counted_ids[c])
-                for c in ["defected_sign_board", "pothole", "road_crack", "damaged_road_marking", "drain_issue"]
+                for c in [
+                    "defected_sign_board",
+                    "pothole",
+                    "road_crack",
+                    "damaged_road_marking",
+                    "drain_issue",
+                ]
             )
 
             # ── 7. Assemble result JSON ───────────────────────────────────────
-            # Build frames array for playback
+
+            # Group into frames array
             frames_dict = {}
             for info in confirmed.values():
                 f_id = info["first_detected_frame"]
                 if f_id not in frames_dict:
                     frames_dict[f_id] = {"frame_id": f_id, "detections": []}
-                
-                b = info["bbox"]
+
+                bbox = info.get("bbox", {"x1": 0, "y1": 0, "x2": 0, "y2": 0})
                 det_entry = {
                     "frame_id": f_id,
                     "detection_id": info["detection_id"],
                     "type": info["type"],
                     "confidence": info["confidence"],
-                    "bbox": b,
-                    "center": {"x": (b["x1"] + b["x2"]) // 2, "y": (b["y1"] + b["y2"]) // 2},
-                    "mask": info.get("mask"),
+                    "count": {
+                        c: len(counted_ids.get(c, set())) for c in DETECTION_CATEGORIES
+                    },
+                    "bbox": bbox,
+                    "mask": info.get("segmentation_mask"),
+                    "center": {
+                        "x": (bbox["x1"] + bbox["x2"]) // 2,
+                        "y": (bbox["y1"] + bbox["y2"]) // 2,
+                    },
+                    "area": max(0, bbox["x2"] - bbox["x1"])
+                    * max(0, bbox["y2"] - bbox["y1"]),
                 }
                 frames_dict[f_id]["detections"].append(det_entry)
 
@@ -386,18 +374,31 @@ class GeminiVideoDetector:
                 "processed_at": datetime.now().isoformat(),
                 "video_info": {
                     "total_frames": total_frames,
-                    "fps": float(f"{fps:.2f}"),
-                    "duration": float(f"{video_duration:.2f}"),
+                    "fps": round(fps, 2),
+                    "duration": round(video_duration, 2),
                     "width": width,
                     "height": height,
+                    "resolution": f"{width}x{height}",
                 },
                 "summary": {
+                    "total_frames": total_frames,
+                    "unique_defected_sign_board": len(
+                        counted_ids["defected_sign_board"]
+                    ),
+                    "unique_pothole": len(counted_ids["pothole"]),
+                    "unique_road_crack": len(counted_ids["road_crack"]),
+                    "unique_damaged_road_marking": len(
+                        counted_ids["damaged_road_marking"]
+                    ),
+                    "unique_good_sign_board": len(counted_ids["good_sign_board"]),
+                    "unique_drain_issue": len(counted_ids["drain_issue"]),
+                    "unique_defective_culvert": len(
+                        counted_ids.get("defective_culvert", set())
+                    ),
+                    "unique_good_culvert": len(counted_ids.get("good_culvert", set())),
                     "total_road_damage": total_road_damage,
                     "total_detections": total_detections,
-                    "unique_pothole": len(counted_ids["pothole"]),
-                    "unique_defected_sign_board": len(counted_ids["defected_sign_board"]),
                 },
-                "frames": frames_list,
                 "defected_sign_board_list": class_lists["defected_sign_board"],
                 "pothole_list": class_lists["pothole"],
                 "road_crack_list": class_lists["road_crack"],
@@ -406,151 +407,485 @@ class GeminiVideoDetector:
                 "drain_issue_list": class_lists["drain_issue"],
                 "defective_culvert_list": class_lists["defective_culvert"],
                 "good_culvert_list": class_lists["good_culvert"],
+                "frames": frames_list,
             }
 
+            # Save to disk
+            detection_results[video_id] = results
             with open(RESULTS_DIR / f"{video_id}.json", "w") as f:
                 json.dump(results, f, indent=2)
 
+            logger.info(f"Results saved: {total_detections} detections for {video_id}")
+
             # ── 8. Save to DB ─────────────────────────────────────────────────
             self._send_progress(loop, video_id, 90, "Saving to database...")
-            self._save_to_db(video_id, list(confirmed.values()))
+            all_detections_flat = list(confirmed.values())
+            _t0 = time.perf_counter()
+            self._save_to_db(video_id, all_detections_flat)
+            _t_db = time.perf_counter() - _t0
 
             process_end = time.time()
-            logger.info(f"GeminiVideoDetector completed in {process_end - process_start:.1f}s")
+            elapsed = process_end - process_start
+            logger.info(
+                f"GeminiVideoDetector completed for {video_id} in {elapsed:.1f}s — "
+                f"{total_detections} detections"
+            )
 
+            # ── Perf report → perf.log ────────────────────────────────────────
+            _avg = lambda t, n: (t / n * 1000) if n else 0.0
+            _warn = lambda t: " ⚠️" if t > 60 else ""
+            perf_logger.info(
+                "\n"
+                f"{'=' * 78}\n"
+                f"  PERF REPORT — [{video_id}]  mode=gemini_video\n"
+                f"{'=' * 78}\n"
+                f"  {'Stage':<30} {'Total (s)':>10} {'Count':>7} {'Avg/call (ms)':>15}\n"
+                f"  {'-' * 30} {'-' * 10} {'-' * 7} {'-' * 15}\n"
+                f"  {'File upload + poll':<30} {_t_upload:>10.3f} {'N/A':>7} {'N/A':>15}{_warn(_t_upload)}\n"
+                f"  {'Gemini API inference':<30} {_t_gemini_api:>10.3f} {'N/A':>7} {'N/A':>15}{_warn(_t_gemini_api)}\n"
+                f"  {'Window scan (YOLOE)':<30} {_t_window_scan:>10.3f} {_n_window_scan:>7} {_avg(_t_window_scan, _n_window_scan):>15.2f}{_warn(_t_window_scan)}\n"
+                f"  {'GPS coord lookup':<30} {_t_gps:>10.3f} {_n_gps:>7} {_avg(_t_gps, _n_gps):>15.2f}\n"
+                f"  {'DB bulk write':<30} {_t_db:>10.3f} {'N/A':>7} {'N/A':>15}\n"
+                f"  {'-' * 30} {'-' * 10} {'-' * 7} {'-' * 15}\n"
+                f"  TOTAL pipeline time               {elapsed:.3f}s\n"
+                f"  Video duration                    {video_duration:.1f}s  ({total_frames} frames @ {fps:.0f} FPS)\n"
+                f"  Detections saved                  {total_detections}\n"
+                f"{'=' * 78}"
+            )
+
+            # ── 9. Complete ───────────────────────────────────────────────────
             processing_status[video_id] = {"status": "completed", "progress": 100}
-            self._send_ws(loop, video_id, {"type": "complete", "status": "completed", "summary": results["summary"]})
+            self._send_ws(
+                loop,
+                video_id,
+                {
+                    "type": "complete",
+                    "status": "completed",
+                    "summary": results["summary"],
+                },
+            )
             return results
 
         except Exception as e:
-            logger.error(f"GeminiVideoDetector error: {e}", exc_info=True)
+            logger.error(
+                f"GeminiVideoDetector error for {video_id}: {e}", exc_info=True
+            )
             processing_status[video_id] = {"status": "error", "message": str(e)}
             self._send_ws(loop, video_id, {"type": "error", "message": str(e)})
             raise
-        finally:
-            try:
-                if "uploaded_file" in locals() and uploaded_file:
-                    self.client.files.delete(name=uploaded_file.name)
-            except: pass
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
+        finally:
+            # Clean up the uploaded file from Gemini
+            try:
+                if "uploaded_file" in dir() and uploaded_file:
+                    self.client.files.delete(name=uploaded_file.name)
+                    logger.info(f"Cleaned up Gemini file: {uploaded_file.name}")
+            except Exception:
+                pass
+
+    # ── Helper methods ─────────────────────────────────────────────────────────
 
     @staticmethod
     def _parse_response(raw_text: str) -> list:
-        match = re.search(r'\[.*\]', raw_text, re.DOTALL)
-        if not match: return []
+        """Extract a JSON array from the Gemini response text."""
+        # Try to find JSON array in the response
+        match = re.search(r"\[.*\]", raw_text, re.DOTALL)
+        if not match:
+            logger.warning("No JSON array found in Gemini response")
+            return []
+
         try:
-            return json.loads(match.group())
-        except: return []
+            data = json.loads(match.group())
+            if not isinstance(data, list):
+                logger.warning("Gemini response JSON is not a list")
+                return []
+            return data
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Gemini response JSON: {e}")
+            return []
 
     @staticmethod
     def _parse_timestamp(ts: str) -> float:
+        """Convert MM:SS or HH:MM:SS or MM:SS.mmm to seconds as float."""
         parts = ts.strip().split(":")
         try:
-            if len(parts) == 2: return int(parts[0]) * 60 + int(parts[1])
-            if len(parts) == 3: return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
-        except: pass
+            if len(parts) == 2:
+                return float(parts[0]) * 60.0 + float(parts[1])
+            elif len(parts) == 3:
+                return (
+                    float(parts[0]) * 3600.0 + float(parts[1]) * 60.0 + float(parts[2])
+                )
+        except (ValueError, IndexError):
+            pass
         return 0.0
 
     @staticmethod
     def _rescale_bbox(box_2d: list, width: int, height: int) -> dict:
-        if not box_2d or len(box_2d) != 4: return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
-        ymin, xmin, ymax, xmax = map(float, box_2d)
+        """
+        Rescale Gemini's normalized [ymin, xmin, ymax, xmax] (0-1000)
+        to pixel coordinates {x1, y1, x2, y2}, then expand by 2× (center-
+        preserving) so YOLOE has a generous search region around the object.
+        The result is clamped to the actual frame dimensions.
+        """
+        if not box_2d or len(box_2d) != 4:
+            return {"x1": 0, "y1": 0, "x2": 0, "y2": 0}
+
+        ymin, xmin, ymax, xmax = box_2d
+        px1 = int(xmin / 1000 * width)
+        py1 = int(ymin / 1000 * height)
+        px2 = int(xmax / 1000 * width)
+        py2 = int(ymax / 1000 * height)
+
+        # Expand 2× around the center: output spans cx ± box_w and cy ± box_h,
+        # which doubles each side relative to the original box dimensions.
+        cx = (px1 + px2) / 2
+        cy = (py1 + py2) / 2
+        box_w = px2 - px1  # full original box width  → 2× expansion delta
+        box_h = py2 - py1  # full original box height → 2× expansion delta
+
         return {
-            "x1": int(max(0, xmin / 1000 * width)),
-            "y1": int(max(0, ymin / 1000 * height)),
-            "x2": int(min(width, xmax / 1000 * width)),
-            "y2": int(min(height, ymax / 1000 * height)),
+            "x1": max(0, int(cx - box_w)),
+            "y1": max(0, int(cy - box_h)),
+            "x2": min(width, int(cx + box_w)),
+            "y2": min(height, int(cy + box_h)),
         }
 
     @staticmethod
-    def _calculate_iou(box1: dict, box2_tuple: tuple) -> float:
-        x1, y1, x2, y2 = box1["x1"], box1["y1"], box1["x2"], box1["y2"]
-        bx1, by1, bx2, by2 = box2_tuple
-        xi1, yi1, xi2, yi2 = max(x1, bx1), max(y1, by1), min(x2, bx2), min(y2, by2)
-        inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
-        area1 = (x2 - x1) * (y2 - y1)
-        area2 = (bx2 - bx1) * (by2 - by1)
-        return inter / (area1 + area2 - inter + 1e-9)
+    def _extract_snapshot(
+        video_path: str, timestamp_sec: float, video_id: str, det_id: int
+    ) -> str | None:
+        """DEPRECATED: Now handled inline with _get_frame_at_time for refinement."""
+        pass
 
     @staticmethod
-    def _extract_best_snapshot(video_path, timestamp_sec, video_id, det_id):
+    def _get_frame_at_time(video_path: str, timestamp_sec: float):
         try:
             cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened(): return None
-            best_frame, best_score = None, -1
-            for offset in [-0.5, -0.25, 0.0, 0.25, 0.5]:
-                cap.set(cv2.CAP_PROP_POS_MSEC, max(0, timestamp_sec + offset) * 1000)
-                ret, frame = cap.read()
-                if not ret: continue
-                score = cv2.Laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var()
-                if score > best_score:
-                    best_score, best_frame = score, frame
+            if not cap.isOpened():
+                return None
+            cap.set(cv2.CAP_PROP_POS_MSEC, timestamp_sec * 1000)
+            ret, frame = cap.read()
             cap.release()
-            if best_frame is not None:
-                path = SNAPSHOT_DIR / f"{video_id}_det_{det_id}.jpg"
-                cv2.imwrite(str(path), best_frame)
-                return str(path), best_frame
-        except: pass
-        return None
+            return frame if ret else None
+        except Exception as e:
+            logger.warning(
+                f"Failed to explicitly extract frame at {timestamp_sec}s: {e}"
+            )
+            return None
+
+    # ── Gemini class → YOLOE prompt keyword mapping ─────────────────────────────
+    # Keywords are substrings matched against YOLOE's free-text prompt labels.
+    # Expanded from real log analysis — add any new labels seen in the ↳ lines.
+    GEMINI_TO_YOLOE_KEYWORDS = {
+        "defected_sign_board": [
+            "signboard",
+            "circular traffic sign",
+            "triangular",
+            "prohibitory",
+            "round",
+            # observed in logs: model uses 'circular' standalone, 'erased', 'convex', etc.
+            "circular",
+            "no parking",
+            "erased",
+            "convex",
+            "rectangular road",
+            "faded triangular",
+            "faded rectangular",
+            "damaged triangle",
+        ],
+        "good_sign_board": [
+            "signboard",
+            "circular traffic sign",
+            "triangular",
+            "prohibitory",
+            "round",
+            "circular",
+            "no parking",
+            "rectangular road",
+        ],
+        # pothole: keep tight — 'aggregate'/'raveling' labels are road surface degradation NOT potholes
+        "pothole": [
+            "pothole",
+            "pothole with",
+            "deep pothole",
+            "shallow pothole",
+            "multiple pothole",
+        ],
+        "road_crack": ["crack", "pavement crack"],
+        # disabled: YOLOE has no lane/crosswalk-marking prompts
+        "damaged_road_marking": [],
+        # Classes below have no YOLOE prompts — window scan returns Gemini-timestamp frame
+        "drain_issue": [],
+        "defective_culvert": [],
+        "good_culvert": [],
+    }
+
+    # Max fraction of frame area a YOLOE box may cover before being rejected
+    # (prevents whole-frame false-positives from being used as a bbox)
+    _YOLOE_MAX_BOX_AREA_FRACTION = 0.70
 
     @staticmethod
-    def _find_nearest_gps(t, points):
-        if not points: return {"lat": None, "lng": None}
-        times = [p.get("timestamp", 0) for p in points]
-        idx = bisect.bisect_left(times, t)
-        if idx == 0: n = points[0]
-        elif idx >= len(points): n = points[-1]
-        else:
-            b, a = points[idx-1], points[idx]
-            n = b if abs(b.get("timestamp",0)-t) <= abs(a.get("timestamp",0)-t) else a
-        return {"lat": n.get("lat"), "lng": n.get("lng")}
+    def _find_best_frame_in_window(
 
-    @staticmethod
-    def _load_gps_data(path):
-        if not Path(path).exists(): return []
+        video_path: str,
+        timestamp_sec: float,
+        gemini_bbox: dict,
+        target_class: str,
+        video_duration: float,
+        window_sec: float = 1.0,
+        step_sec: float = 0.25,
+    ) -> tuple:
+        """
+        Scan frames in [timestamp_sec - window_sec, timestamp_sec + window_sec]
+        at step_sec intervals and return the (frame, refined_bbox, best_ts) where
+        YOLOE yielded the highest-confidence match for target_class.
+
+        For classes with no YOLOE prompts, falls back immediately to the single
+        frame at timestamp_sec (no extra I/O cost).
+
+        Returns (frame_bgr, bbox_dict, actual_timestamp_sec, mask_points).
+        If no suitable frame is found, returns (None, gemini_bbox, timestamp_sec, None).
+        """
+        match_keywords = GeminiVideoDetector.GEMINI_TO_YOLOE_KEYWORDS.get(
+            target_class, []
+        )
+
+        # No YOLOE prompts for this class — just return the single frame
+        if not match_keywords:
+            frame = GeminiVideoDetector._get_frame_at_time(video_path, timestamp_sec)
+            return frame, gemini_bbox, timestamp_sec
+
+        offsets = []
+        t = -window_sec
+        while t <= window_sec + 1e-9:
+            offsets.append(round(t, 4))
+            t += step_sec
+
+        best_frame = None
+        best_bbox = gemini_bbox
+        best_ts = timestamp_sec
+        best_conf = -1.0
+        best_mask = None
+
+        # Open the video once and reuse
         try:
-            with open(path, "r") as f: return json.load(f).get("gpsPoints", [])
-        except: return []
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return None, gemini_bbox, timestamp_sec
 
-    def _save_to_db(self, video_id, dets):
+            from app.helpers.yoloe_helper import load_yoloe_model
+            model = load_yoloe_model()
+
+            for offset in offsets:
+                probe_ts = timestamp_sec + offset
+                if probe_ts < 0 or probe_ts > video_duration:
+                    continue
+
+                cap.set(cv2.CAP_PROP_POS_MSEC, probe_ts * 1000)
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    continue
+
+                results = model.predict(frame, conf=0.10, verbose=False)
+                r = results[0]
+                if r.boxes is None or len(r.boxes) == 0:
+                    continue
+
+                boxes = r.boxes.xyxy.cpu().numpy()
+                class_ids = r.boxes.cls.cpu().numpy().astype(int)
+                confs = r.boxes.conf.cpu().numpy()
+                names = r.names
+                fh, fw = frame.shape[:2]
+                is_sign = "sign" in target_class
+                min_conf = 0.40 if is_sign else 0.10
+
+                for idx, (box, cls_id, conf) in enumerate(zip(boxes, class_ids, confs)):
+                    prompt_name = names.get(cls_id, "").lower()
+                    if not any(kw in prompt_name for kw in match_keywords):
+                        continue
+                    if conf < min_conf:
+                        continue
+                    x1, y1, x2, y2 = map(int, box)
+                    area_frac = ((x2 - x1) * (y2 - y1)) / (fw * fh)
+                    if area_frac > GeminiVideoDetector._YOLOE_MAX_BOX_AREA_FRACTION:
+                        continue
+
+                    if conf > best_conf:
+                        best_conf = conf
+                        best_frame = frame.copy()
+                        best_bbox = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                        best_ts = probe_ts
+                        
+                        # Extract mask if available
+                        best_mask = None
+                        if r.masks is not None and idx < len(r.masks.data):
+                            mask_raw = r.masks.data[idx].cpu().numpy()
+                            if mask_raw.shape[:2] != (fh, fw):
+                                mask_raw = cv2.resize(mask_raw, (fw, fh), interpolation=cv2.INTER_NEAREST)
+                            
+                            # Convert mask to list of points for JSON serialization
+                            mask_binary = (mask_raw > 0.5).astype(np.uint8)
+                            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            if contours:
+                                # Standard format [x, y, x, y, ...] for each contour
+                                best_mask = [contour.flatten().tolist() for contour in contours]
+
+                        logger.info(
+                            f"[Window Scan] offset={offset:+.2f}s, ts={probe_ts:.2f}s "
+                            f"→ '{prompt_name}' conf={conf:.2f} box=({x1},{y1})-({x2},{y2})"
+                        )
+
+            cap.release()
+        except Exception as e:
+            logger.error(f"[Window Scan] Error: {e}", exc_info=True)
+            return None, gemini_bbox, timestamp_sec, None
+
+        if best_frame is not None:
+            logger.info(
+                f"[Window Scan] ✅ Best frame for '{target_class}' at ts={best_ts:.2f}s "
+                f"(offset={best_ts - timestamp_sec:+.2f}s, conf={best_conf:.2f}, mask={'YES' if best_mask else 'NO'})"
+            )
+        else:
+            # No YOLOE hit anywhere in the window — return the Gemini-timestamp frame
+            logger.warning(
+                f"[Window Scan] No YOLOE match in ±{window_sec}s window for "
+                f"'{target_class}'. Using Gemini timestamp frame."
+            )
+            best_frame = GeminiVideoDetector._get_frame_at_time(video_path, timestamp_sec)
+
+        return best_frame, best_bbox, best_ts, best_mask
+
+
+    
+
+
+    @staticmethod
+    def _find_nearest_gps(detection_time: float, gps_points: list) -> dict:
+        """Return the GPS point whose timestamp is closest to detection_time."""
+        if not gps_points:
+            return {"lat": None, "lng": None}
+
+        timestamps = [p.get("timestamp", 0) for p in gps_points]
+        idx = bisect.bisect_left(timestamps, detection_time)
+
+        if idx == 0:
+            nearest = gps_points[0]
+        elif idx >= len(gps_points):
+            nearest = gps_points[-1]
+        else:
+            before, after = gps_points[idx - 1], gps_points[idx]
+            nearest = (
+                before
+                if abs(before.get("timestamp", 0) - detection_time)
+                <= abs(after.get("timestamp", 0) - detection_time)
+                else after
+            )
+
+        return {"lat": nearest.get("lat"), "lng": nearest.get("lng")}
+
+    @staticmethod
+    def _load_gps_data(json_path: str) -> list:
+        """Load GPS points from the uploaded JSON file."""
+        if not json_path or not Path(json_path).exists():
+            return []
+        try:
+            with open(json_path, "r") as f:
+                gps_data = json.load(f)
+                gps_points = gps_data.get("gpsPoints", [])
+                logger.info(f"Loaded {len(gps_points)} GPS points from {json_path}")
+                return gps_points
+        except Exception as e:
+            logger.warning(f"Failed to load GPS data: {e}")
+            return []
+
+    def _save_to_db(self, video_id: str, all_detections: list):
+        """Bulk-insert detections into the database."""
         db = SessionLocal()
         try:
             video = db.query(Video).filter(Video.id == video_id).first()
-            vc_id = video.chainage_id if video else None
-            vp_id, vpr_id, vdir = None, None, None
-            if vc_id and video.chainage:
-                vp_id, vdir = video.chainage.package_id, video.chainage.direction
-                if video.chainage.package: vpr_id = video.chainage.package.project_id
+            video_chainage_id = video.chainage_id if video else None
+            video_package_id = None
+            video_project_id = None
+            video_direction = None
 
-            db_dets = []
-            for d in dets:
-                lat, lng = d.get("lat"), d.get("lng")
-                c_id, p_id, pr_id = vc_id, vp_id, vpr_id
+            if video_chainage_id and video.chainage:
+                video_package_id = video.chainage.package_id
+                video_direction = video.chainage.direction
+                if video.chainage.package:
+                    video_project_id = video.chainage.package.project_id
+
+            db_detections = []
+            for info in all_detections:
+                lat, lng = info.get("lat"), info.get("lng")
+                project_id = video_project_id
+                package_id = video_package_id
+                chainage_id = video_chainage_id
+
                 if lat and lng:
-                    ch = find_chainage_by_gps(db, lat, lng, package_id=vp_id, direction=vdir)
-                    if ch:
-                        c_id, p_id = ch.id, ch.package_id
-                        if ch.package: pr_id = ch.package.project_id
+                    chainage = find_chainage_by_gps(
+                        db,
+                        lat,
+                        lng,
+                        package_id=video_package_id,
+                        direction=video_direction,
+                    )
+                    if chainage:
+                        chainage_id = chainage.id
+                        package_id = chainage.package_id
+                        if chainage.package:
+                            project_id = chainage.package.project_id
 
                 db_det = Detection(
-                    video_id=video_id, frame_number=d["first_detected_frame"],
-                    timestamp_ms=int(d["first_detected_time"] * 1000),
-                    confidence=d["confidence"], detection_type=d["type"], class_name=d["type"],
-                    latitude=lat, longitude=lng, project_id=pr_id, package_id=p_id, chainage_id=c_id,
+                    video_id=video_id,
+                    frame_number=info["first_detected_frame"],
+                    timestamp_ms=int(info["first_detected_time"] * 1000),
+                    confidence=info["confidence"],
+                    detection_type=info["type"],
+                    class_name=info["type"],
+                    latitude=lat,
+                    longitude=lng,
+                    project_id=project_id,
+                    package_id=package_id,
+                    chainage_id=chainage_id,
                 )
-                db_det.set_bounding_box(d.get("bbox", {}))
-                db_det.set_segmentation_mask(d.get("mask"))
-                db_dets.append(db_det)
-            if db_dets:
-                crud.create_detections_bulk(db, db_dets)
-        except Exception as e: logger.error(f"DB save error: {e}")
-        finally: db.close()
+                db_det.set_bounding_box(info.get("bbox", {}))
+                
+                # Save mask if available
+                if info.get("segmentation_mask"):
+                    db_det.set_mask(info["segmentation_mask"])
+                    
+                db_detections.append(db_det)
 
-    def _send_progress(self, loop, video_id, progress, message=""):
-        processing_status[video_id].update({"progress": progress, "status": "processing", "message": message})
-        self._send_ws(loop, video_id, {"type": "progress", "progress": progress, "message": message})
+            if db_detections:
+                crud.create_detections_bulk(db, db_detections)
+                logger.info(
+                    f"Saved {len(db_detections)} Gemini detections to DB for {video_id}"
+                )
+        except Exception as e:
+            logger.error(f"GeminiVideoDetector DB save error: {e}")
+        finally:
+            db.close()
+
+    def _send_progress(self, loop, video_id: str, progress: int, message: str = ""):
+        """Update in-memory status and send WebSocket progress message."""
+        processing_status[video_id]["progress"] = progress
+        processing_status[video_id]["status"] = "processing"
+        if message:
+            processing_status[video_id]["message"] = message
+        self._send_ws(
+            loop,
+            video_id,
+            {
+                "type": "progress",
+                "progress": progress,
+                "message": message,
+            },
+        )
 
     @staticmethod
-    def _send_ws(loop, video_id, payload):
-        asyncio.run_coroutine_threadsafe(manager.send_message(video_id, payload), loop)
+    def _send_ws(loop, video_id: str, payload: dict):
+        """Send a WebSocket message via the event loop."""
+        asyncio.run_coroutine_threadsafe(
+            manager.send_message(video_id, payload),
+            loop,
+        )

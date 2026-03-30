@@ -1,5 +1,3 @@
-"""CRUD operations for database models"""
-
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Optional, List
@@ -94,6 +92,7 @@ def create_detection(
     project_id: Optional[str] = None,
     package_id: Optional[str] = None,
     chainage_id: Optional[str] = None,
+    segmentation_mask: Optional[list] = None,
 ) -> Detection:
     """Create a new detection record"""
     detection = Detection(
@@ -111,6 +110,8 @@ def create_detection(
         chainage_id=chainage_id,
     )
     detection.set_bounding_box(bounding_box)
+    if segmentation_mask:
+        detection.set_mask(segmentation_mask)
     db.add(detection)
     db.commit()
     db.refresh(detection)

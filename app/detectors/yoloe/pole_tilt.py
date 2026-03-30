@@ -1,21 +1,3 @@
-"""
-Pole Tilt Analysis — Estimate whether a signboard pole is upright or bent.
-
-Given a signboard bounding box (and optionally a segmentation mask),
-this module extracts the pole region (lower portion of the bbox) and
-estimates the tilt angle of the pole relative to vertical.
-
-Two estimation methods:
-  • Primary:  Segmentation mask → cv2.fitLine on pole-region mask pixels
-  • Fallback: Canny edges → cv2.HoughLinesP → most-vertical line
-
-Classification:
-  • tilt < 15°  → "GOOD SIGNBOARD"
-  • tilt ≥ 15°  → "BENT POLE"
-
-Entry point: analyze_pole_tilt(frame, box, mask=None)
-"""
-
 import logging
 import math
 

@@ -1,5 +1,3 @@
-"""Detection model for storing individual detection results"""
-
 from sqlalchemy import String, Integer, Float, ForeignKey, Text, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
@@ -50,7 +48,7 @@ class Detection(Base):
     # Bounding box stored as JSON string
     bounding_box: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Segmentation mask stored as JSON string (normalized polygon or RLE)
+    # Segmentation mask stored as JSON string (optional)
     segmentation_mask: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationship to video
@@ -67,13 +65,15 @@ class Detection(Base):
         """Convert bounding box dict to JSON string"""
         self.bounding_box = json.dumps(bbox)
 
-    def get_segmentation_mask(self) -> list | dict | None:
-        """Parse segmentation mask JSON string"""
-        return json.loads(self.segmentation_mask) if self.segmentation_mask else None
+    def get_mask(self) -> list | None:
+        """Parse segmentation mask JSON string to list of points"""
+        if not self.segmentation_mask:
+            return None
+        return json.loads(self.segmentation_mask)
 
-    def set_segmentation_mask(self, mask_data: list | dict | None) -> None:
-        """Convert segmentation mask data to JSON string"""
-        self.segmentation_mask = json.dumps(mask_data) if mask_data is not None else None
+    def set_mask(self, mask: list) -> None:
+        """Convert segmentation mask list to JSON string"""
+        self.segmentation_mask = json.dumps(mask)
 
 
 # Create composite index for video_id and frame_number for faster queries

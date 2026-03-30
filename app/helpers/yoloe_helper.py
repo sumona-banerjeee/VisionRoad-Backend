@@ -1,32 +1,3 @@
-"""
-YOLOE Helper — Open-vocabulary detection with text prompts.
-
-Encapsulates all YOLOE-specific logic:
-  • 49 text prompts across sign + pothole categories
-  • Dual confidence thresholds (signboard=0.65, pothole=0.10)
-  • 5 post-detection filters for pothole FP removal
-  • Display label mapping (Defective Signboard / Pothole)
-  • YOLOE model loading (lazy singleton)
-  • Per-frame inference with full filter pipeline
-  • Pole tilt analysis for signboard detections
-
-Called by YoloeDetector — this helper owns the model, prompts, and inference;
-the detector owns the video loop, progress, GPS, DB etc.
-
-Return contract for process_frame_with_yoloe():
-    [
-        {
-            "class_name":  str,    # backend name ("defected_sign_board" / "pothole")
-            "prompt_name": str,    # original YOLOE prompt
-            "confidence":  float,
-            "bbox":        tuple,  # (x1, y1, x2, y2)
-            "center":      tuple,  # (cx, cy)
-            "mask":        list,   # normalized polygon points [[x,y], ...]
-        },
-        ...
-    ]
-"""
-
 import logging
 import threading
 import time
@@ -385,7 +356,7 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
 
     Returns:
         List of detection dicts with keys:
-            class_name, prompt_name, confidence, bbox, center, mask
+            class_name, prompt_name, confidence, bbox, center
     """
     results = model.predict(frame, conf=YOLOE_CONF_THRESHOLD, verbose=False)
 
@@ -399,10 +370,8 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
 
         # Extract segmentation masks if available
         masks_data = None
-        masks_xyn = None
         if r.masks is not None:
             masks_data = r.masks.data.cpu().numpy()  # (N, H, W)
-            masks_xyn = r.masks.xyn  # List of normalized (x, y) polygons
 
         for idx, (box, conf, cls_id) in enumerate(
             zip(boxes, confs, class_ids)
@@ -441,13 +410,7 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
                 "confidence": round(float(conf), 3),
                 "bbox": (x1, y1, x2, y2),
                 "center": (cx, cy),
-                "mask": None
             }
-
-            # Include normalized mask if available
-            if masks_xyn is not None and idx < len(masks_xyn):
-                # masks_xyn[idx] is a numpy array of shape (N, 2)
-                det["mask"] = masks_xyn[idx].tolist()
 
             # ── Pole tilt analysis for signboard detections ────────────
             if backend_class == "defected_sign_board":
@@ -472,3 +435,6 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
             detections.append(det)
 
     return detections
+
+
+

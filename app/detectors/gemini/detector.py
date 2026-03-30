@@ -8,6 +8,7 @@ import asyncio
 import logging
 import bisect
 import yaml
+from typing import Any, cast
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -48,7 +49,7 @@ DETECTION_CATEGORIES = [
 CONFIDENCE_MAP = {
     "high": 0.95,
     "medium": 0.75,
-    "low": 0.50,
+    "low": 0.55,
 }
 
 # Snapshot output directory
@@ -65,7 +66,10 @@ try:
 except Exception as _e:
     logger.error(f"Failed to load prompts.yaml: {_e}. Using fallback prompt.")
     DETECTION_PROMPT = (
-        "Detect road defects in this dashcam video. Return ONLY a JSON array."
+        "Detect road defects in this dashcam video. Categories: defected_sign_board, pothole, road_crack, "
+        "damaged_road_marking, good_sign_board, drain_issue, defective_culvert, good_culvert. "
+        "Return ONLY a JSON array. Each object should have: 'timestamp' (MM:SS), 'label', "
+        "'point' [y, x] (normalized 0-1000, 500=center), 'confidence' (high/medium/low), and 'description'."
     )
 
 
@@ -237,17 +241,27 @@ class GeminiVideoDetector:
 
             confirmed = {}
             counted_ids = {cat: set() for cat in DETECTION_CATEGORIES}
-            det_id = 0
-
+            det_id_counter: int = 0
             for det in detections:
-                label = det.get("label", "").strip()
-                if label not in DETECTION_CATEGORIES:
-                    logger.warning(f"Skipping unknown label: {label}")
+                det_dict: dict[str, Any] = cast(dict, det)
+                label_raw = str(det_dict.get("label", "")).strip().lower()
+                # Resolve label from categories (handle case/underscore differences)
+                resolved_label = None
+                for cat in DETECTION_CATEGORIES:
+                    if cat.lower() == label_raw.replace("-", "_").replace(" ", "_"):
+                        resolved_label = str(cat)
+                        break
+                
+                if resolved_label is None:
+                    logger.warning(f"Skipping unknown label: {label_raw}")
                     continue
+                
+                label: str = str(resolved_label)
 
-                det_id += 1
-                timestamp_str = det.get("timestamp", "00:00")
-                timestamp_sec = self._parse_timestamp(timestamp_str)
+                det_id_counter += 1
+                det_id = det_id_counter
+                timestamp_str = str(det.get("timestamp", "00:00"))
+                timestamp_sec: float = self._parse_timestamp(timestamp_str)
 
                 # Clamp to video duration
                 timestamp_sec = min(timestamp_sec, video_duration)
@@ -255,17 +269,36 @@ class GeminiVideoDetector:
                 point = det.get("point")
                 if point and isinstance(point, list) and len(point) == 2:
                     y, x = point
-                    # Create a 150x150 box centered on the point (normalized 0-1000)
-                    # This provides enough context for YOLOE window scan to refine it.
-                    box_2d = [max(0, y - 75), max(0, x - 75), min(1000, y + 75), min(1000, x + 75)]
+                    # Pass the normalized point for spatial filtering in window scan
+                    gemini_point = {"y": y, "x": x}
+                    # Create a default 100x100 box (10% of frame) as fallback
+                    box_2d = [max(0, y - 50), max(0, x - 50), min(1000, y + 50), min(1000, x + 50)]
                 else:
-                    box_2d = det.get("box_2d", [0, 0, 1000, 1000])
+                    gemini_point = None
+                    box_2d = det.get("box_2d", [400, 400, 600, 600])
 
                 bbox = self._rescale_bbox(box_2d, width, height)
 
                 # Confidence
                 conf_str = det.get("confidence", "medium").lower()
                 confidence = CONFIDENCE_MAP.get(conf_str, 0.75)
+
+                # ── Confidence gate ──────────────────────────────────────
+                # Signboards: user requires ≥60% confidence
+                # Potholes: require ≥70% to reduce false positives
+                is_sign_class = "sign" in label
+                if is_sign_class and confidence < 0.60:
+                    logger.info(
+                        f"Skipping low-confidence signboard: {label} "
+                        f"conf={confidence} ({conf_str}) at {timestamp_str}"
+                    )
+                    continue
+                if label == "pothole" and confidence < 0.70:
+                    logger.info(
+                        f"Skipping low-confidence pothole: "
+                        f"conf={confidence} ({conf_str}) at {timestamp_str}"
+                    )
+                    continue
 
                 description = det.get("description", "")
 
@@ -275,8 +308,8 @@ class GeminiVideoDetector:
                 # up to ~1 s away from the reported timestamp.
                 snapshot_path = None
                 _t0 = time.perf_counter()
-                best_frame_bgr, best_bbox, best_ts, best_mask = self._find_best_frame_in_window(
-                    video_path, timestamp_sec, bbox, label, video_duration
+                best_frame_bgr, best_bbox, best_ts, best_mask, yolo_conf = self._find_best_frame_in_window(
+                    video_path, timestamp_sec, bbox, label, video_duration, gemini_point=gemini_point
                 )
                 _t_window_scan += time.perf_counter() - _t0
                 _n_window_scan += 1
@@ -285,15 +318,17 @@ class GeminiVideoDetector:
                     bbox = best_bbox
                     timestamp_sec = best_ts
                     mask = best_mask
+                    if yolo_conf != -1.0:
+                        confidence = round(yolo_conf, 3)
                 else:
                     mask = None
 
                 # Frame number derived from the winning timestamp
-                frame_number = max(1, int(timestamp_sec * fps))
+                frame_number = max(1, int(float(timestamp_sec) * float(fps)))
 
                 # GPS lookup
                 _t0 = time.perf_counter()
-                gps_coords = self._find_nearest_gps(timestamp_sec, gps_points)
+                gps_coords = self._find_nearest_gps(float(timestamp_sec), gps_points)
                 _t_gps += time.perf_counter() - _t0
                 _n_gps += 1
 
@@ -317,14 +352,15 @@ class GeminiVideoDetector:
             self._send_progress(loop, video_id, 85, "Building results...")
 
             # ── 6. Build per-class lists ──────────────────────────────────────
-            class_lists = {}
+            class_lists: dict[str, list] = {}
             for cat in DETECTION_CATEGORIES:
-                class_lists[cat] = sorted(
-                    [info for info in confirmed.values() if info["type"] == cat],
-                    key=lambda x: x["first_detected_time"],
+                cat_str = str(cat)
+                class_lists[cat_str] = sorted(
+                    [info for info in confirmed.values() if str(info.get("type")) == cat_str],
+                    key=lambda x: float(x.get("first_detected_time", 0)),
                 )
 
-            total_detections = len(confirmed)
+            total_detections = int(len(confirmed))
             total_road_damage = sum(
                 len(counted_ids[c])
                 for c in [
@@ -340,20 +376,27 @@ class GeminiVideoDetector:
 
             # Group into frames array
             frames_dict = {}
-            for info in confirmed.values():
+            running_counts = {c: 0 for c in DETECTION_CATEGORIES}
+            
+            # Sort all detections sequentially by their detected frame
+            sorted_detections = sorted(confirmed.values(), key=lambda x: x["first_detected_frame"])
+            
+            for info in sorted_detections:
                 f_id = info["first_detected_frame"]
                 if f_id not in frames_dict:
                     frames_dict[f_id] = {"frame_id": f_id, "detections": []}
+
+                label_type = info["type"]
+                if label_type in running_counts:
+                    running_counts[label_type] += 1
 
                 bbox = info.get("bbox", {"x1": 0, "y1": 0, "x2": 0, "y2": 0})
                 det_entry = {
                     "frame_id": f_id,
                     "detection_id": info["detection_id"],
-                    "type": info["type"],
+                    "type": label_type,
                     "confidence": info["confidence"],
-                    "count": {
-                        c: len(counted_ids.get(c, set())) for c in DETECTION_CATEGORIES
-                    },
+                    "count": dict(running_counts),
                     "bbox": bbox,
                     "mask": info.get("segmentation_mask"),
                     "center": {
@@ -487,22 +530,36 @@ class GeminiVideoDetector:
 
     @staticmethod
     def _parse_response(raw_text: str) -> list:
-        """Extract a JSON array from the Gemini response text."""
-        # Try to find JSON array in the response
-        match = re.search(r"\[.*\]", raw_text, re.DOTALL)
+        """Extract a JSON array from the Gemini response text, handling markdown blocks."""
+        # Clean markdown code blocks if present
+        text = raw_text.strip()
+        if text.startswith("```"):
+            # Multi-line match for content inside ```json or ``` blocks
+            blocks = re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+            if blocks:
+                text = blocks[0].strip()
+        
+        # Now find the first [ and last ]
+        match = re.search(r"\[.*\]", text, re.DOTALL)
         if not match:
-            logger.warning("No JSON array found in Gemini response")
+            logger.warning("No JSON array found in Gemini response text")
             return []
 
         try:
             data = json.loads(match.group())
             if not isinstance(data, list):
-                logger.warning("Gemini response JSON is not a list")
+                logger.warning("Gemini response is JSON but not a list")
                 return []
             return data
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Gemini response JSON: {e}")
-            return []
+            # Last ditch effort: try cleaning more aggressively
+            try:
+                # Remove common LLM text artifacts
+                cleaned = re.sub(r"//.*", "", match.group()) # Remove single line comments
+                return json.loads(cleaned)
+            except:
+                logger.error(f"Failed to parse Gemini response JSON: {e}")
+                return []
 
     @staticmethod
     def _parse_timestamp(ts: str) -> float:
@@ -536,12 +593,11 @@ class GeminiVideoDetector:
         px2 = int(xmax / 1000 * width)
         py2 = int(ymax / 1000 * height)
 
-        # Expand 2× around the center: output spans cx ± box_w and cy ± box_h,
-        # which doubles each side relative to the original box dimensions.
+        # Expand 1.5× around the center instead of 2× to keep it 'proper'
         cx = (px1 + px2) / 2
         cy = (py1 + py2) / 2
-        box_w = px2 - px1  # full original box width  → 2× expansion delta
-        box_h = py2 - py1  # full original box height → 2× expansion delta
+        box_w = (px2 - px1) * 0.75  # 1.5x expansion delta (0.75 on each side)
+        box_h = (py2 - py1) * 0.75
 
         return {
             "x1": max(0, int(cx - box_w)),
@@ -579,11 +635,14 @@ class GeminiVideoDetector:
     GEMINI_TO_YOLOE_KEYWORDS = {
         "defected_sign_board": [
             "signboard",
+            "sign",
+            "traffic sign",
             "circular traffic sign",
             "triangular",
+            "triangle",
+            "warning",
             "prohibitory",
             "round",
-            # observed in logs: model uses 'circular' standalone, 'erased', 'convex', etc.
             "circular",
             "no parking",
             "erased",
@@ -592,26 +651,35 @@ class GeminiVideoDetector:
             "faded triangular",
             "faded rectangular",
             "damaged triangle",
+            "speed",
+            "road sign",
         ],
         "good_sign_board": [
             "signboard",
+            "sign",
+            "traffic sign",
             "circular traffic sign",
             "triangular",
+            "triangle",
+            "warning",
             "prohibitory",
             "round",
             "circular",
             "no parking",
             "rectangular road",
+            "speed",
+            "road sign",
+            "intact",
+            "clean",
+            "visible",
+            "good condition",
+            "municipal",
         ],
-        # pothole: keep tight — 'aggregate'/'raveling' labels are road surface degradation NOT potholes
+        # pothole: keep tight — only accept detections with "pothole" in the name
         "pothole": [
             "pothole",
-            "pothole with",
-            "deep pothole",
-            "shallow pothole",
-            "multiple pothole",
         ],
-        "road_crack": ["crack", "pavement crack"],
+        "road_crack": ["crack", "pavement crack", "alligator", "crack withing", "longitudinal crack"],
         # disabled: YOLOE has no lane/crosswalk-marking prompts
         "damaged_road_marking": [],
         # Classes below have no YOLOE prompts — window scan returns Gemini-timestamp frame
@@ -624,9 +692,8 @@ class GeminiVideoDetector:
     # (prevents whole-frame false-positives from being used as a bbox)
     _YOLOE_MAX_BOX_AREA_FRACTION = 0.70
 
-    @staticmethod
     def _find_best_frame_in_window(
-
+        self,
         video_path: str,
         timestamp_sec: float,
         gemini_bbox: dict,
@@ -634,17 +701,17 @@ class GeminiVideoDetector:
         video_duration: float,
         window_sec: float = 1.0,
         step_sec: float = 0.25,
+        gemini_point: dict | None = None,
     ) -> tuple:
         """
         Scan frames in [timestamp_sec - window_sec, timestamp_sec + window_sec]
-        at step_sec intervals and return the (frame, refined_bbox, best_ts) where
+        at step_sec intervals and return the (frame, refined_bbox, best_ts, mask) where
         YOLOE yielded the highest-confidence match for target_class.
 
-        For classes with no YOLOE prompts, falls back immediately to the single
-        frame at timestamp_sec (no extra I/O cost).
+        Space-anchoring: If gemini_point is provided, we prefer YOLOE detections 
+        that are spatially close to that point.
 
-        Returns (frame_bgr, bbox_dict, actual_timestamp_sec, mask_points).
-        If no suitable frame is found, returns (None, gemini_bbox, timestamp_sec, None).
+        Returns (frame_bgr, bbox_dict, actual_timestamp_sec, mask_points, confidence).
         """
         match_keywords = GeminiVideoDetector.GEMINI_TO_YOLOE_KEYWORDS.get(
             target_class, []
@@ -653,7 +720,7 @@ class GeminiVideoDetector:
         # No YOLOE prompts for this class — just return the single frame
         if not match_keywords:
             frame = GeminiVideoDetector._get_frame_at_time(video_path, timestamp_sec)
-            return frame, gemini_bbox, timestamp_sec
+            return frame, gemini_bbox, timestamp_sec, None, -1.0
 
         offsets = []
         t = -window_sec
@@ -666,12 +733,16 @@ class GeminiVideoDetector:
         best_ts = timestamp_sec
         best_conf = -1.0
         best_mask = None
+        
+        # Normalized gemini point to pixel coords for distance calculation
+        anchor_px = None
+        anchor_py = None
 
         # Open the video once and reuse
         try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
-                return None, gemini_bbox, timestamp_sec
+                return None, gemini_bbox, timestamp_sec, None, -1.0
 
             from app.helpers.yoloe_helper import load_yoloe_model
             model = load_yoloe_model()
@@ -686,6 +757,11 @@ class GeminiVideoDetector:
                 if not ret or frame is None:
                     continue
 
+                fh, fw = frame.shape[:2]
+                if gemini_point and anchor_px is None:
+                    anchor_px = gemini_point["x"] / 1000.0 * fw
+                    anchor_py = gemini_point["y"] / 1000.0 * fh
+
                 results = model.predict(frame, conf=0.10, verbose=False)
                 r = results[0]
                 if r.boxes is None or len(r.boxes) == 0:
@@ -695,25 +771,67 @@ class GeminiVideoDetector:
                 class_ids = r.boxes.cls.cpu().numpy().astype(int)
                 confs = r.boxes.conf.cpu().numpy()
                 names = r.names
-                fh, fw = frame.shape[:2]
+                
                 is_sign = "sign" in target_class
-                min_conf = 0.40 if is_sign else 0.10
+                is_pothole = target_class == "pothole"
+                # Signs: lower threshold so we don't miss triangular/small signs
+                # Potholes: higher threshold to reduce false positives
+                if is_sign:
+                    min_conf = 0.15
+                elif is_pothole:
+                    min_conf = 0.40
+                else:
+                    min_conf = 0.10
 
                 for idx, (box, cls_id, conf) in enumerate(zip(boxes, class_ids, confs)):
                     prompt_name = names.get(cls_id, "").lower()
+                    
+                    # Reject non-traffic sign billboards (hoardings/hotel signs/commercial boards)
+                    if is_sign and any(kw in prompt_name for kw in ["advertisement", "billboard", "commercial", "shop", "hoarding", "banner"]):
+                        continue
+
                     if not any(kw in prompt_name for kw in match_keywords):
                         continue
                     if conf < min_conf:
                         continue
-                    x1, y1, x2, y2 = map(int, box)
-                    area_frac = ((x2 - x1) * (y2 - y1)) / (fw * fh)
+                    
+                    bx1, by1, bx2, by2 = map(float, box)
+                    bw = bx2 - bx1
+                    bh = by2 - by1
+                    area_frac = (bw * bh) / (float(fw) * float(fh))
+                    
                     if area_frac > GeminiVideoDetector._YOLOE_MAX_BOX_AREA_FRACTION:
                         continue
 
-                    if conf > best_conf:
-                        best_conf = conf
+                    # Pothole post-detection filters (shadow/size/texture/aspect/brightness)
+                    if is_pothole:
+                        from app.helpers.yoloe_helper import _run_pothole_filters
+                        skip, reason = _run_pothole_filters(
+                            frame, int(bx1), int(by1), int(bx2), int(by2)
+                        )
+                        if skip:
+                            logger.debug(
+                                f"[Window Scan] Pothole filtered at offset={offset:+.2f}s: {reason}"
+                            )
+                            continue
+
+                    # Spatial filter: If we have an anchor point, discourage distant boxes
+                    score = float(conf)
+                    if anchor_px is not None and anchor_py is not None:
+                        bcx = (bx1 + bx2) / 2.0
+                        bcy = (by1 + by2) / 2.0
+                        # Normalized distance (0 to ~1.41)
+                        dist = np.sqrt(((bcx - anchor_px)/fw)**2 + ((bcy - anchor_py)/fh)**2)
+                        # Reduce score by up to 0.5 based on distance (0.2 distance penalty threshold)
+                        if dist > 0.3:
+                            score -= 0.4
+                        elif dist > 0.1:
+                            score -= 0.1
+
+                    if float(score) > float(best_conf):
+                        best_conf = float(score)
                         best_frame = frame.copy()
-                        best_bbox = {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+                        best_bbox = {"x1": int(bx1), "y1": int(by1), "x2": int(bx2), "y2": int(by2)}
                         best_ts = probe_ts
                         
                         # Extract mask if available
@@ -732,17 +850,17 @@ class GeminiVideoDetector:
 
                         logger.info(
                             f"[Window Scan] offset={offset:+.2f}s, ts={probe_ts:.2f}s "
-                            f"→ '{prompt_name}' conf={conf:.2f} box=({x1},{y1})-({x2},{y2})"
+                            f"→ '{prompt_name}' score={score:.2f} (conf={conf:.2f}) box=({int(bx1)},{int(by1)})-({int(bx2)},{int(by2)})"
                         )
 
             cap.release()
         except Exception as e:
             logger.error(f"[Window Scan] Error: {e}", exc_info=True)
-            return None, gemini_bbox, timestamp_sec, None
+            return None, gemini_bbox, timestamp_sec, None, -1.0
 
         if best_frame is not None:
             logger.info(
-                f"[Window Scan] ✅ Best frame for '{target_class}' at ts={best_ts:.2f}s "
+                f"[Window Scan]   Best frame for '{target_class}' at ts={best_ts:.2f}s "
                 f"(offset={best_ts - timestamp_sec:+.2f}s, conf={best_conf:.2f}, mask={'YES' if best_mask else 'NO'})"
             )
         else:
@@ -753,7 +871,7 @@ class GeminiVideoDetector:
             )
             best_frame = GeminiVideoDetector._get_frame_at_time(video_path, timestamp_sec)
 
-        return best_frame, best_bbox, best_ts, best_mask
+        return best_frame, best_bbox, best_ts, best_mask, best_conf
 
 
     

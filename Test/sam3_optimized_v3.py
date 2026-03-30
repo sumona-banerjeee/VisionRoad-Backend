@@ -302,7 +302,7 @@ def main():
         return
 
     gpu_name = torch.cuda.get_device_name(0)
-    print(f"✅ Hardware Detected: {gpu_name}")
+    print(f"  Hardware Detected: {gpu_name}")
 
     # Hardware unlocks
     torch.backends.cudnn.benchmark = True
@@ -327,7 +327,7 @@ def main():
         print(f"Error loading model: {e}")
         return
     t_model_load = time.time() - t_load_start
-    print(f"✅ Model loaded in {t_model_load:.1f}s")
+    print(f"  Model loaded in {t_model_load:.1f}s")
 
     if not os.path.exists(INPUT_VIDEO):
         print("❌ Input video not found.")
@@ -725,7 +725,7 @@ def main():
 
     W = 60
     print(f"\n\n{'=' * W}")
-    print(f"  ✅  SAM 3 v3 — Optimized Detection Summary (ByteTrack)")
+    print(f"     SAM 3 v3 — Optimized Detection Summary (ByteTrack)")
     print(f"{'=' * W}")
     print(f"  {'Class':<40} {'Count':>6}")
     print(f"  {'-' * (W - 4)}")

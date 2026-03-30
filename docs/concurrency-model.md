@@ -4,10 +4,10 @@
 
 Think of our video processing system like a restaurant:
 
-| Role | System Component | Resource |
-|---|---|---|
-| **Waiter** (takes orders) | `cap.read()` — frame decode | CPU |
-| **Chef** (cooks food) | `model.track()` — YOLO detection | GPU |
+| Role                               | System Component                      | Resource        |
+| ---------------------------------- | ------------------------------------- | --------------- |
+| **Waiter** (takes orders)          | `cap.read()` — frame decode           | CPU             |
+| **Chef** (cooks food)              | `model.track()` — YOLO detection      | GPU             |
 | **Food Inspector** (quality check) | `verify_detection_with_vl()` — VL API | Network (cloud) |
 
 In a **bad restaurant** (old blocking code), the waiter, chef, and inspector all work one at a time:
@@ -66,14 +66,14 @@ Time    Main Thread                          VL Pool
 112ms   Found crack tid=12 → CONFIRMED ───→  Submit VL for tid=12
 112ms   cap.read(frame 108*)    [CPU 25ms]      Worker 3: calling Ollama API...
         ...
-2000ms  (some later frame)                      Worker 1: ✅ VL says tid=5 IS pothole
+2000ms  (some later frame)                      Worker 1:   VL says tid=5 IS pothole
         Check VL results → tid=5 verified!       → mark confirmed[5].vl_verified = True
         ...
 2500ms  (some later frame)                      Worker 2: ❌ VL says tid=8 is NOT a sign
         Check VL results → tid=8 rejected!       → del confirmed[8], add to rejected_tids
 ```
 
-*\* Odd frames skipped because FRAME_SKIP=2*
+_\* Odd frames skipped because FRAME_SKIP=2_
 
 ### Key Observations
 
@@ -94,7 +94,7 @@ _async_vl_executor (MAX_VL_CONCURRENT=4 workers)
 ├── Submitted from the main frame loop
 └── Results checked via _process_completed_vl_futures()
 
-_vl_timeout_executor (4 workers)  
+_vl_timeout_executor (4 workers)
 ├── Runs the raw Ollama API call (vl_client.chat)
 ├── Submitted from INSIDE verify_detection_with_vl()
 └── Used ONLY for VL_TIMEOUT enforcement (30s hard limit)
@@ -125,13 +125,13 @@ Save to database
 
 ## Configuration
 
-| Variable | Default | Effect |
-|---|---|---|
-| `FRAME_SKIP` | `2` | Process every Nth frame (reduces CPU decode load) |
-| `YOLO_IMGSZ` | `640` | YOLO input resolution (lower = faster, less accurate) |
-| `MAX_VL_CONCURRENT` | `4` | Max parallel VL API calls |
-| `VL_TIMEOUT_SECONDS` | `30` | Hard timeout per VL call |
-| `ENABLE_VL_VERIFICATION` | `true` | Toggle VL entirely on/off |
+| Variable                 | Default | Effect                                                |
+| ------------------------ | ------- | ----------------------------------------------------- |
+| `FRAME_SKIP`             | `2`     | Process every Nth frame (reduces CPU decode load)     |
+| `YOLO_IMGSZ`             | `640`   | YOLO input resolution (lower = faster, less accurate) |
+| `MAX_VL_CONCURRENT`      | `4`     | Max parallel VL API calls                             |
+| `VL_TIMEOUT_SECONDS`     | `30`    | Hard timeout per VL call                              |
+| `ENABLE_VL_VERIFICATION` | `true`  | Toggle VL entirely on/off                             |
 
 ---
 
@@ -139,9 +139,9 @@ Save to database
 
 Same video (2671 frames, 89s duration) on RTX 5090:
 
-| Configuration | Processing Time | VL Timeouts |
-|---|---|---|
-| FRAME_SKIP=1, Blocking VL | ~4.5 minutes | 27 |
-| FRAME_SKIP=2, Async VL | **~34 seconds** | 0 |
+| Configuration             | Processing Time | VL Timeouts |
+| ------------------------- | --------------- | ----------- |
+| FRAME_SKIP=1, Blocking VL | ~4.5 minutes    | 27          |
+| FRAME_SKIP=2, Async VL    | **~34 seconds** | 0           |
 
 **~8x total speedup** by combining frame skipping + async VL.

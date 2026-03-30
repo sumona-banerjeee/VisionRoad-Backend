@@ -479,7 +479,7 @@ while processing:
                     damage_indicator = "🚨 DAMAGE" if is_damage else "ℹ️  INFO"
 
                     print(
-                        f"✅ Frame {frame_id:3d} ({current_time:5.2f}s): "
+                        f"  Frame {frame_id:3d} ({current_time:5.2f}s): "
                         f"CONFIRMED ID {tid:2d} - {class_name:25s} at ({cx:4d}, {cy:4d}) "
                         f"[conf={conf:.2f}, frames={len(recent_detections)}] {damage_indicator}"
                     )

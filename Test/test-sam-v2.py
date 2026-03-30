@@ -136,7 +136,7 @@ def main():
         print("❌ CUDA not detected.")
         return
 
-    print(f"✅ Hardware Detected: {torch.cuda.get_device_name(0)}")
+    print(f"  Hardware Detected: {torch.cuda.get_device_name(0)}")
 
     # RTX optimisations — unchanged
     torch.backends.cudnn.benchmark = True
@@ -161,7 +161,7 @@ def main():
         print(f"Error loading model: {e}")
         return
     t_model_load = time.time() - t_load_start
-    print(f"✅ Model loaded in {t_model_load:.1f}s")
+    print(f"  Model loaded in {t_model_load:.1f}s")
 
     if not os.path.exists(INPUT_VIDEO):
         print("❌ Input video not found.")
@@ -356,7 +356,7 @@ def main():
 
                             track_key = (prompt_name, tid)
 
-                            # ✅ Count only the FIRST time we see this track
+                            #   Count only the FIRST time we see this track
                             if track_key not in seen_tracks:
                                 seen_tracks.add(track_key)
                                 det_id_ctr += 1
@@ -583,7 +583,7 @@ def main():
 
     W = 55
     print(f"\n\n{'='*W}")
-    print(f"  ✅  SAM 3 v2 — Detection Summary (ByteTrack)")
+    print(f"     SAM 3 v2 — Detection Summary (ByteTrack)")
     print(f"{'='*W}")
     print(f"  {'Class':<35} {'Count':>6}")
     print(f"  {'-'*(W-4)}")

@@ -168,7 +168,7 @@ class Sam3Verifier:
             self.model = torch.compile(self.model, mode="reduce-overhead")
 
         self.processor = Sam3Processor.from_pretrained(SAM3_MODEL_ID)
-        logger.info(f"✅ SAM3 loaded in {time.time() - t0:.1f}s")
+        logger.info(f"  SAM3 loaded in {time.time() - t0:.1f}s")
         self._warmup()
 
     def _warmup(self):
@@ -713,7 +713,7 @@ def run(video_path: str):
     # ── Summary print ─────────────────────────────────────────────────────────
     W = 62
     print(f"\n{'=' * W}")
-    print(f"  ✅  YOLO + SAM3 Verification — Results Summary")
+    print(f"     YOLO + SAM3 Verification — Results Summary")
     print(f"{'=' * W}")
     print(f"  Detection Mode   : yolo_sam3")
     print(f"  Video            : {os.path.basename(video_path)}")

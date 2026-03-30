@@ -113,7 +113,7 @@ class Sam3Verifier:
         self.model.eval()
 
         self.processor = Sam3Processor.from_pretrained(SAM3_MODEL_ID)
-        logger.info(f"✅ SAM3 loaded in {time.time() - t0:.1f}s")
+        logger.info(f"  SAM3 loaded in {time.time() - t0:.1f}s")
         self._warmup()
 
     def _warmup(self):

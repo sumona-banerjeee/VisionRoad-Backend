@@ -41,7 +41,7 @@ failed = 0
 def test(name, condition, detail=""):
     global passed, failed
     if condition:
-        print(f"  ✅ {name}")
+        print(f"    {name}")
         passed += 1
     else:
         print(f"  ❌ {name} — {detail}")

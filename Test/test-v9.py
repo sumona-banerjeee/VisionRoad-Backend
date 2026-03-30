@@ -395,7 +395,7 @@ while processing:
                     rejection_stats["multi_frame_pending"].discard(tid)
 
                     print(
-                        f"✅ Frame {frame_id:3d} ({current_time:5.2f}s): "
+                        f"  Frame {frame_id:3d} ({current_time:5.2f}s): "
                         f"CONFIRMED ID {tid:2d} - {class_name:25s} at ({cx:4d}, {cy:4d}) "
                         f"[conf={conf:.2f}, frames={len(recent_detections)}]"
                     )

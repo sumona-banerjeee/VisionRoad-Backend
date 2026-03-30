@@ -56,7 +56,7 @@ def main():
         print("❌ CUDA not detected.")
         return
    
-    print(f"✅ Hardware Detected: {torch.cuda.get_device_name(0)}")
+    print(f"  Hardware Detected: {torch.cuda.get_device_name(0)}")
    
     # ==============================================================================
     # 🚀 RTX 5090 HARDWARE UNLOCKS
@@ -231,7 +231,7 @@ def main():
         cap.release()
         out.release()
         cv2.destroyAllWindows()
-        print(f"\n✅ Done! Saved to {OUTPUT_VIDEO}")
+        print(f"\n  Done! Saved to {OUTPUT_VIDEO}")
  
 if __name__ == "__main__":
     main()

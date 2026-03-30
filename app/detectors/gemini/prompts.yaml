@@ -1,0 +1,41 @@
+detection_prompt: >
+  Detect road defects in this dashcam footage with high spatial and temporal precision. 
+  Your primary goal is EXHAUSTIVE DETECTION — do not miss any instances of the categories listed below.
+
+  Categories to identify:
+  - defected_sign_board: Traffic signs that are bent, leaning, faded, broken, or rusted.  
+  - pothole: ONLY actual depressions, holes, or cavities in the road surface asphalt where
+    material is visibly missing and the road is physically broken. Do NOT flag dark patches,
+    shadows, wet spots, oil stains, manhole covers, painted markings, or discolored asphalt
+    as potholes. A pothole MUST show a clear depression or cavity with visible broken edges.
+  - road_crack: Significant fissures, cracks, or alligator cracking in the pavement.
+  - damaged_road_marking: Faded, peeling, or obscured lane lines, crosswalks, or messages on the road.
+  - good_sign_board: ANY clearly visible and intact traffic sign in good condition — including
+    triangular warning signs (like Clamping Zone, Men at Work), circular prohibitory signs, rectangular information signs,
+    speed limit signs, and all other signboard shapes. If a sign is intact and readable, mark
+    it as good_sign_board regardless of shape. Do NOT detect commercial advertising boards, billboards, hotel signs, hoardings, shop boards, or generic advertisement signs.
+  - drain_issue: Blockages, structural damage (cracked lids), or surface obstructions in drainage.
+  - defective_culvert: Culverts with debris, structural failure, or blockage.
+  - good_culvert: Clean and fully functional culvert pipes or bridges.
+
+  Instructions:
+  1. SCAN EVERY SECOND: Analyze the video carefully from start to finish.
+  2. MULTIPLE OBJECTS: If multiple defects are visible at the same time, list each one in a separate object.
+  3. EXACT COORDINATES: For each detection, provide the precise [y, x] center point in normalized 0-1000 coordinates.
+  4. NO SKIPPING: Even small or distant defects should be flagged if they are clearly recognizable.
+  5. SIGNBOARD PRIORITY: Detect ALL signboards (triangular, circular, rectangular, any shape).
+     Every traffic sign visible on the roadside should be reported — do not skip any.
+  6. POTHOLE STRICTNESS: Only report a pothole if you can clearly see a physical depression
+     or cavity in the road surface. If in doubt, do NOT report it as a pothole.
+  7. Return a JSON array. Do not include markdown code blocks (no '```json'). Just the raw array.
+
+  JSON Schema:
+  [
+    {
+      "timestamp": "MM:SS.mmm",
+      "label": "category_name",
+      "confidence": "high/medium/low",
+      "point": [y, x],
+      "description": "Specific visual details about the defect"
+    }
+  ]

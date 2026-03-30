@@ -165,7 +165,7 @@ def main():
         print("❌ CUDA not detected.")
         return
 
-    print(f"✅ Hardware Detected: {torch.cuda.get_device_name(0)}")
+    print(f"  Hardware Detected: {torch.cuda.get_device_name(0)}")
 
     # RTX optimisations — unchanged from v0
     torch.backends.cudnn.benchmark = True
@@ -546,7 +546,7 @@ def main():
 
     # final summary table
     print(f"\n\n{'='*55}")
-    print(f"  ✅  SAM 3 v1 — Detection Summary")
+    print(f"     SAM 3 v1 — Detection Summary")
     print(f"{'='*55}")
     print(f"  {'Class':<35} {'Count':>6}")
     print(f"  {'-'*41}")

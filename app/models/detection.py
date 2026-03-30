@@ -50,6 +50,9 @@ class Detection(Base):
     # Bounding box stored as JSON string
     bounding_box: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # Segmentation mask stored as JSON string (normalized polygon or RLE)
+    segmentation_mask: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Relationship to video
     video: Mapped["Video"] = relationship("Video", back_populates="detections")
 
@@ -63,6 +66,14 @@ class Detection(Base):
     def set_bounding_box(self, bbox: dict) -> None:
         """Convert bounding box dict to JSON string"""
         self.bounding_box = json.dumps(bbox)
+
+    def get_segmentation_mask(self) -> list | dict | None:
+        """Parse segmentation mask JSON string"""
+        return json.loads(self.segmentation_mask) if self.segmentation_mask else None
+
+    def set_segmentation_mask(self, mask_data: list | dict | None) -> None:
+        """Convert segmentation mask data to JSON string"""
+        self.segmentation_mask = json.dumps(mask_data) if mask_data is not None else None
 
 
 # Create composite index for video_id and frame_number for faster queries

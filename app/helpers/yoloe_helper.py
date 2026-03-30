@@ -21,6 +21,7 @@ Return contract for process_frame_with_yoloe():
             "confidence":  float,
             "bbox":        tuple,  # (x1, y1, x2, y2)
             "center":      tuple,  # (cx, cy)
+            "mask":        list,   # normalized polygon points [[x,y], ...]
         },
         ...
     ]
@@ -384,7 +385,7 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
 
     Returns:
         List of detection dicts with keys:
-            class_name, prompt_name, confidence, bbox, center
+            class_name, prompt_name, confidence, bbox, center, mask
     """
     results = model.predict(frame, conf=YOLOE_CONF_THRESHOLD, verbose=False)
 
@@ -398,8 +399,10 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
 
         # Extract segmentation masks if available
         masks_data = None
+        masks_xyn = None
         if r.masks is not None:
             masks_data = r.masks.data.cpu().numpy()  # (N, H, W)
+            masks_xyn = r.masks.xyn  # List of normalized (x, y) polygons
 
         for idx, (box, conf, cls_id) in enumerate(
             zip(boxes, confs, class_ids)
@@ -438,7 +441,13 @@ def process_frame_with_yoloe(model: YOLOE, frame) -> list[dict]:
                 "confidence": round(float(conf), 3),
                 "bbox": (x1, y1, x2, y2),
                 "center": (cx, cy),
+                "mask": None
             }
+
+            # Include normalized mask if available
+            if masks_xyn is not None and idx < len(masks_xyn):
+                # masks_xyn[idx] is a numpy array of shape (N, 2)
+                det["mask"] = masks_xyn[idx].tolist()
 
             # ── Pole tilt analysis for signboard detections ────────────
             if backend_class == "defected_sign_board":

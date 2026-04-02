@@ -17,11 +17,21 @@ detection_prompt: |
       * Sign is upright and properly mounted on its pole or gantry
       NOT: shop boards, hoardings, commercial banners, building name plates
 
-  - pothole: A bowl-shaped hole, cavity, or depression broken into the paved road surface. Look for:
-      * Dark irregular holes in asphalt with visible depth
-      * Broken or missing chunks of road surface
-      * Water pooling in a depression on the road
-      NOT: shadows, painted road markings, speed bumps, or road edges
+  - pothole: A hole or cavity where asphalt has physically broken away and is MISSING from the road surface.
+      ONLY flag as pothole if you can see BOTH of the following together:
+      (A) A CONCAVE DEPRESSION — the area is visibly lower/sunken below the surrounding road level
+          AND
+      (B) ONE of these structural breaks around or inside that depression:
+          * Broken, jagged, or crumbling asphalt edge at the rim of the hole
+          * Bare sub-base (soil, gravel, or stone base) exposed INSIDE the hole because the asphalt above it is gone
+          * Water pooled or dried mud settled inside the hollow
+
+      DO NOT FLAG — these are NOT potholes:
+      * Any surface where material is resting ON TOP of the road (dust, sand, loose gravel, debris) — if the surface below is intact, it is NOT a pothole
+      * Dark or discoloured patches that are flat/level with the surrounding road — no depression = no pothole
+      * Shadows — no broken rim, no depth, edges are soft/gradient
+      * Road cracks, alligator cracking, or surface crazing without a sunken hole — use road_crack instead
+      * Speed bumps, rumble strips, painted markings
 
   - road_crack: Visible linear, branching, or alligator (map) cracks running through the asphalt or concrete pavement — NOT road edges or lane markings
 

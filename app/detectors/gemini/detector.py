@@ -72,13 +72,28 @@ SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 _PROMPT_FILE = Path(__file__).parent / "prompts.yaml"
 try:
     with _PROMPT_FILE.open(encoding="utf-8") as _f:
-        DETECTION_PROMPT: str = yaml.safe_load(_f)["detection_prompt"]
-    logger.debug(f"Loaded detection prompt from {_PROMPT_FILE}")
+        _yaml_data = yaml.safe_load(_f)
+
+    if not isinstance(_yaml_data, dict) or "detection_prompt" not in _yaml_data:
+        raise KeyError(
+            f"'detection_prompt' key is missing from {_PROMPT_FILE}. "
+            f"Keys found: {list(_yaml_data.keys()) if isinstance(_yaml_data, dict) else 'none (file is empty or not a mapping)'}"
+        )
+
+    DETECTION_PROMPT: str = _yaml_data["detection_prompt"]
+    if not DETECTION_PROMPT or not DETECTION_PROMPT.strip():
+        raise ValueError(f"'detection_prompt' in {_PROMPT_FILE} is empty.")
+
+    logger.info(f"Loaded detection prompt from {_PROMPT_FILE} ({len(DETECTION_PROMPT)} chars)")
+
 except Exception as _e:
-    logger.error(f"Failed to load prompts.yaml: {_e}. Using fallback prompt.")
-    DETECTION_PROMPT = (
-        "Detect road defects in this dashcam video. Return ONLY a JSON array."
-    )
+    # Re-raise as RuntimeError so the application fails loudly at startup.
+    # A missing / malformed prompt means ALL detections would be useless —
+    # it is safer to crash than to silently process with a broken prompt.
+    raise RuntimeError(
+        f"[GeminiDetector] Failed to load detection prompt from {_PROMPT_FILE}: {_e}"
+    ) from _e
+
 
 
 def get_gemini_executor() -> ThreadPoolExecutor:
@@ -280,8 +295,8 @@ class GeminiVideoDetector:
                 # up to ~1 s away from the reported timestamp.
                 snapshot_path = None
                 _t0 = time.perf_counter()
-                best_frame_bgr, best_bbox, best_ts = self._find_best_frame_in_window(
-                    video_path, timestamp_sec, bbox, label, video_duration
+                best_frame_bgr, best_bbox, best_ts, best_conf = self._find_best_frame_in_window(
+                    video_path, timestamp_sec, bbox, label, video_duration, confidence=confidence
                 )
                 _t_window_scan += time.perf_counter() - _t0
                 _n_window_scan += 1
@@ -289,6 +304,7 @@ class GeminiVideoDetector:
                 if best_frame_bgr is not None:
                     bbox = best_bbox
                     timestamp_sec = best_ts
+                    confidence = float(best_conf)  # cast numpy float32 → Python float for JSON serialization
 
                 # Frame number derived from the winning timestamp
                 frame_number = max(1, int(timestamp_sec * fps))
@@ -632,6 +648,7 @@ class GeminiVideoDetector:
         gemini_bbox: dict,
         target_class: str,
         video_duration: float,
+        confidence: float,
         window_sec: float = 1.0,
         step_sec: float = 0.25,
     ) -> tuple:
@@ -653,7 +670,7 @@ class GeminiVideoDetector:
         # No YOLOE prompts for this class — just return the single frame
         if not match_keywords:
             frame = GeminiVideoDetector._get_frame_at_time(video_path, timestamp_sec)
-            return frame, gemini_bbox, timestamp_sec
+            return frame, gemini_bbox, timestamp_sec, confidence
 
         offsets = []
         t = -window_sec
@@ -670,7 +687,7 @@ class GeminiVideoDetector:
         try:
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
-                return None, gemini_bbox, timestamp_sec
+                return None, gemini_bbox, timestamp_sec, confidence
 
             from app.helpers.yoloe_helper import load_yoloe_model
             model = load_yoloe_model()
@@ -696,7 +713,7 @@ class GeminiVideoDetector:
                 names = r.names
                 fh, fw = frame.shape[:2]
                 is_sign = "sign" in target_class
-                min_conf = 0.40 if is_sign else 0.10
+                min_conf = 0.40 if is_sign else 0.15
 
                 for box, cls_id, conf in zip(boxes, class_ids, confs):
                     prompt_name = names.get(cls_id, "").lower()
@@ -722,7 +739,7 @@ class GeminiVideoDetector:
             cap.release()
         except Exception as e:
             logger.error(f"[Window Scan] Error: {e}", exc_info=True)
-            return None, gemini_bbox, timestamp_sec
+            return None, gemini_bbox, timestamp_sec, confidence
 
         if best_frame is not None:
             logger.info(
@@ -737,8 +754,7 @@ class GeminiVideoDetector:
             )
             best_frame = GeminiVideoDetector._get_frame_at_time(video_path, timestamp_sec)
 
-        return best_frame, best_bbox, best_ts
-
+        return best_frame, best_bbox, best_ts, best_conf
 
     
 

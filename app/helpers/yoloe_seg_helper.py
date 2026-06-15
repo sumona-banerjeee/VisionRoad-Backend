@@ -26,8 +26,9 @@ RDD_CRACK_CONF = 0.30  # confidence threshold for RDD2022 road crack model
 # ── YOLOE open-vocab text prompts ────────────────────────────────────────────
 TARGET_PROMPTS = [
     "pothole",
-    "asphalt crack",
     "manhole cover",
+    "traffic signboard",
+    "signboard",
     "traffic sign",
     "street light pole",
     "water puddle",
@@ -36,9 +37,10 @@ TARGET_PROMPTS = [
 # Map YOLOE prompts → backend class names
 PROMPT_TO_CLASS = {
     "pothole": "pothole",
-    "asphalt crack": "asphalt_crack",
     "manhole cover": "manhole_cover",
-    "traffic sign": "traffic_sign",
+    "traffic signboard": "defected_sign_board",
+    "signboard": "defected_sign_board",
+    "traffic sign": "defected_sign_board",
     "street light pole": "street_light_pole",
     "water puddle": "water_puddle",
 }

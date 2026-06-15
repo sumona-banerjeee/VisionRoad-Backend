@@ -46,6 +46,7 @@ class DetectionMode(str, Enum):
     YOLOE_TRAINED_VL = "yoloe_trained_vl"
     CULVERT_DETECTION = "culvert_detection"
     COMBINED = "combined"
+    HF_ROAD_DAMAGE = "hf_road_damage"
     GEMINI_VIDEO = "gemini_video"
 
 

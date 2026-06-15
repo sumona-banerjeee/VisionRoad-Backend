@@ -6,9 +6,11 @@ Usage:
     python seed_data.py
 """
 
+import os
 import requests
 
-BASE_URL = "http://localhost:8000/api/v1"
+_PORT = os.environ.get("PORT", "8000")
+BASE_URL = f"http://localhost:{_PORT}/api/v1"
 
 
 def create_project(name, state, corridor_name, start_lat, start_lng, end_lat, end_lng):
@@ -275,7 +277,7 @@ def main():
     print("=" * 60)
 
     try:
-        response = requests.get("http://localhost:8000/")
+        response = requests.get(f"http://localhost:{_PORT}/")
         print("✓ API server is running\n")
     except requests.exceptions.ConnectionError:
         print("✗ ERROR: Cannot connect to API server!")
@@ -294,7 +296,7 @@ def main():
     print(f"  - List packages:   GET {BASE_URL}/packages")
     print(f"  - List chainages:  GET {BASE_URL}/chainages")
     print(f"  - Project summary: GET {BASE_URL}/summary/projects/<project_id>")
-    print(f"  - API docs:        http://localhost:8000/docs")
+    print(f"  - API docs:        http://localhost:{_PORT}/docs")
     print("=" * 60 + "\n")
 
 

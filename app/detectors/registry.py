@@ -23,6 +23,7 @@ from app.helpers.sam3_helper import process_with_sam3
 from app.detectors.yoloe_trained_vl.detector import YoloeTrainedVlDetector
 from app.detectors.culvert.detector import CulvertDetector
 from app.detectors.combined.detector import CombinedDetector
+from app.detectors.hf_road_damage.detector import HfRoadDamageDetector
 
 def _make_gemini_detector():
     """Lazy import so the server boots even when google-genai is not installed."""
@@ -38,5 +39,6 @@ DETECTOR_REGISTRY = {
     "yoloe_trained_vl":  lambda: YoloeTrainedVlDetector(),
     "culvert_detection": lambda: CulvertDetector(detection_mode="culvert_detection"),
     "combined":          lambda: CombinedDetector(),
+    "hf_road_damage":    lambda: HfRoadDamageDetector(),
     "gemini_video":      _make_gemini_detector,
 }

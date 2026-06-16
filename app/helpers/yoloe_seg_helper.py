@@ -44,12 +44,12 @@ YOLOE_PF_CLASS_MAP = {
     "drain": "manhole_cover",
 
     # Traffic signs / signboards
-    "traffic sign": "defected_sign_board",
-    "traffic signboard": "defected_sign_board",
-    "signboard": "defected_sign_board",
-    "sign": "defected_sign_board",
-    "stop sign": "defected_sign_board",
-    "road sign": "defected_sign_board",
+    "traffic sign": "sign_board",
+    "traffic signboard": "sign_board",
+    "signboard": "sign_board",
+    "sign": "sign_board",
+    "stop sign": "sign_board",
+    "road sign": "sign_board",
 
     # Street light poles
     "street light": "street_light_pole",

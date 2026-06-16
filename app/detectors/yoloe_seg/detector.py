@@ -1,12 +1,15 @@
 """
 YoloeSegDetector — Dual-model detector for comprehensive road feature detection.
 
-Model 1: YOLOE-26x-seg (open-vocabulary) → pothole, asphalt_crack, manhole_cover,
-         traffic_sign, street_light_pole, water_puddle
-Model 2: yolo12s_RDD2022_best.pt (trained) → road_crack
+Model 1: yoloe-26x-seg-pf.pt (prompt-free, 1200+ built-in classes) →
+         pothole, manhole_cover, defected_sign_board, street_light_pole, water_puddle
 
-No tracking filters (BotSort), no ROI filtering, no multi-frame confirmation.
-Pure detection — every frame is processed independently by both models.
+Model 2: yolo12s_RDD2022_best.pt (trained) → road_crack, pothole
+
+KEY FIX vs previous version:
+  - Uses -pf (prompt-free) checkpoint instead of -seg.pt + set_classes()
+  - map_yoloe_seg_class() does case-insensitive lookup for -pf model output names
+  - No other logic changes — tracking, ROI, dedup all still absent by design.
 """
 
 import cv2
@@ -50,7 +53,7 @@ RDD_IMGSZ = int(os.getenv("RDD_IMGSZ", "640"))
 class YoloeSegDetector(BaseDetector):
     """
     Dual-model detector:
-      - YOLOE-26x-seg for open-vocabulary road features
+      - YOLOE-26x-seg-pf for prompt-free road feature detection (matches notebook behavior)
       - RDD2022 for road crack detection
     No tracking, no ROI, no dedup — pure frame-by-frame detection.
     """
@@ -60,7 +63,7 @@ class YoloeSegDetector(BaseDetector):
         self.yoloe_model = None
         self.rdd_model = None
         self.detection_mode = "yoloe_seg"
-        logger.info("YoloeSegDetector created (dual-model)")
+        logger.info("YoloeSegDetector created (dual-model, prompt-free)")
 
     def _load_models(self):
         self.yoloe_model = load_yoloe_seg_model()
@@ -100,12 +103,12 @@ class YoloeSegDetector(BaseDetector):
             process_start = time.time()
 
             perf_timings = {
-                "frame_decode":      {"total": 0.0, "count": 0},
-                "yoloe_inference":   {"total": 0.0, "count": 0},
-                "rdd_inference":     {"total": 0.0, "count": 0},
-                "gps_coord":         {"total": 0.0, "count": 0},
-                "db_gps_match":      {"total": 0.0, "count": 0},
-                "db_bulk_write":     {"total": 0.0, "count": 0},
+                "frame_decode":    {"total": 0.0, "count": 0},
+                "yoloe_inference": {"total": 0.0, "count": 0},
+                "rdd_inference":   {"total": 0.0, "count": 0},
+                "gps_coord":       {"total": 0.0, "count": 0},
+                "db_gps_match":    {"total": 0.0, "count": 0},
+                "db_bulk_write":   {"total": 0.0, "count": 0},
             }
 
             cap = cv2.VideoCapture(video_path)
@@ -119,13 +122,12 @@ class YoloeSegDetector(BaseDetector):
             video_duration = total_frames / fps
 
             logger.info(
-                f"Processing [yoloe_seg dual-model] for {video_id}: "
+                f"Processing [yoloe_seg_pf dual-model] for {video_id}: "
                 f"{total_frames} frames @ {fps:.1f} FPS, {width}x{height}"
             )
 
-            # Detection counter per class
             detection_id_counter = 0
-            all_confirmed = []  # flat list of all detection dicts
+            all_confirmed = []
 
             _ndjson_fd = tempfile.NamedTemporaryFile(
                 mode="w",
@@ -156,7 +158,7 @@ class YoloeSegDetector(BaseDetector):
                 current_time = frame_count / fps
                 frame_data = {"frame_id": frame_count, "detections": []}
 
-                # ── Model 1: YOLOE-26x-seg (open-vocab) ────────────────────
+                # ── Model 1: YOLOE-26x-seg-pf (prompt-free) ────────────────
                 _t0_yoloe = time.perf_counter()
                 yoloe_results = self.yoloe_model.predict(
                     frame,
@@ -170,10 +172,10 @@ class YoloeSegDetector(BaseDetector):
                 perf_timings["yoloe_inference"]["count"] += 1
 
                 if yoloe_results[0].boxes is not None and len(yoloe_results[0].boxes) > 0:
-                    class_ids = yoloe_results[0].boxes.cls.cpu().numpy().astype(int)
-                    boxes = yoloe_results[0].boxes.xyxy.cpu().numpy()
-                    confidences = yoloe_results[0].boxes.conf.cpu().numpy()
-                    names = yoloe_results[0].names
+                    class_ids    = yoloe_results[0].boxes.cls.cpu().numpy().astype(int)
+                    boxes        = yoloe_results[0].boxes.xyxy.cpu().numpy()
+                    confidences  = yoloe_results[0].boxes.conf.cpu().numpy()
+                    names        = yoloe_results[0].names
 
                     for cls_id, box, conf in zip(class_ids, boxes, confidences):
                         cls_id = int(cls_id)
@@ -181,36 +183,39 @@ class YoloeSegDetector(BaseDetector):
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
                         raw_class_name = names.get(cls_id, f"class_{cls_id}")
+
+                        # map_yoloe_seg_class does a case-insensitive lookup
+                        # against YOLOE_PF_CLASS_MAP — returns None for irrelevant classes
                         backend_class = map_yoloe_seg_class(raw_class_name)
                         if backend_class is None:
                             continue
 
                         detection_id_counter += 1
                         det_data = {
-                            "detection_id": detection_id_counter,
-                            "type": backend_class,
-                            "raw_class": raw_class_name,
-                            "model_source": "yoloe_seg",
+                            "detection_id":         detection_id_counter,
+                            "type":                 backend_class,
+                            "raw_class":            raw_class_name,
+                            "model_source":         "yoloe_seg_pf",
                             "first_detected_frame": frame_count,
-                            "first_detected_time": round(current_time, 2),
-                            "confidence": round(float(conf), 3),
-                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                            "first_detected_time":  round(current_time, 2),
+                            "confidence":           round(float(conf), 3),
+                            "bbox":                 {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                         }
                         all_confirmed.append(det_data)
                         total_detections_count += 1
 
                         frame_data["detections"].append({
-                            "frame_id": frame_count,
+                            "frame_id":     frame_count,
                             "detection_id": detection_id_counter,
-                            "type": backend_class,
-                            "raw_class": raw_class_name,
-                            "model_source": "yoloe_seg",
-                            "confidence": round(float(conf), 3),
-                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                            "center": {"x": cx, "y": cy},
+                            "type":         backend_class,
+                            "raw_class":    raw_class_name,
+                            "model_source": "yoloe_seg_pf",
+                            "confidence":   round(float(conf), 3),
+                            "bbox":         {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                            "center":       {"x": cx, "y": cy},
                         })
 
-                # ── Model 2: RDD2022 (road crack only) ─────────────────────
+                # ── Model 2: RDD2022 (road crack + pothole) ─────────────────
                 _t0_rdd = time.perf_counter()
                 rdd_results = self.rdd_model.predict(
                     frame,
@@ -224,10 +229,10 @@ class YoloeSegDetector(BaseDetector):
                 perf_timings["rdd_inference"]["count"] += 1
 
                 if rdd_results[0].boxes is not None and len(rdd_results[0].boxes) > 0:
-                    class_ids = rdd_results[0].boxes.cls.cpu().numpy().astype(int)
-                    boxes = rdd_results[0].boxes.xyxy.cpu().numpy()
+                    class_ids   = rdd_results[0].boxes.cls.cpu().numpy().astype(int)
+                    boxes       = rdd_results[0].boxes.xyxy.cpu().numpy()
                     confidences = rdd_results[0].boxes.conf.cpu().numpy()
-                    names = rdd_results[0].names
+                    names       = rdd_results[0].names
 
                     for cls_id, box, conf in zip(class_ids, boxes, confidences):
                         cls_id = int(cls_id)
@@ -235,41 +240,39 @@ class YoloeSegDetector(BaseDetector):
                         cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
 
                         rdd_class_name = names.get(cls_id, f"class_{cls_id}")
-                        backend_class = map_rdd_crack_class(rdd_class_name)
+                        backend_class  = map_rdd_crack_class(rdd_class_name)
                         if backend_class is None:
-                            continue  # skip D40/Repair, only keep road_crack
+                            continue  # skip Repair class
 
                         detection_id_counter += 1
                         det_data = {
-                            "detection_id": detection_id_counter,
-                            "type": backend_class,
-                            "raw_class": rdd_class_name,
-                            "model_source": "rdd2022",
+                            "detection_id":         detection_id_counter,
+                            "type":                 backend_class,
+                            "raw_class":            rdd_class_name,
+                            "model_source":         "rdd2022",
                             "first_detected_frame": frame_count,
-                            "first_detected_time": round(current_time, 2),
-                            "confidence": round(float(conf), 3),
-                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                            "first_detected_time":  round(current_time, 2),
+                            "confidence":           round(float(conf), 3),
+                            "bbox":                 {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
                         }
                         all_confirmed.append(det_data)
                         total_detections_count += 1
 
                         frame_data["detections"].append({
-                            "frame_id": frame_count,
+                            "frame_id":     frame_count,
                             "detection_id": detection_id_counter,
-                            "type": backend_class,
-                            "raw_class": rdd_class_name,
+                            "type":         backend_class,
+                            "raw_class":    rdd_class_name,
                             "model_source": "rdd2022",
-                            "confidence": round(float(conf), 3),
-                            "bbox": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                            "center": {"x": cx, "y": cy},
+                            "confidence":   round(float(conf), 3),
+                            "bbox":         {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                            "center":       {"x": cx, "y": cy},
                         })
 
-                # Write frame data if it has detections
                 if frame_data["detections"]:
                     _ndjson_fd.write(json.dumps(frame_data) + "\n")
                     _frames_written += 1
 
-                # Progress reporting
                 progress = int((frame_count / total_frames) * 100)
                 if progress - last_progress >= 5:
                     self._send_progress(
@@ -298,31 +301,28 @@ class YoloeSegDetector(BaseDetector):
                 if frame_count > 0 else 0
             )
 
-            frames = self._read_ndjson_frames(
-                _ndjson_fd, _ndjson_path, _frames_written
-            )
+            frames = self._read_ndjson_frames(_ndjson_fd, _ndjson_path, _frames_written)
 
-            # Per-class summary counts
             class_counts = {}
             for cls in ALL_CLASSES:
                 class_counts[f"unique_{cls}"] = len(final_lists.get(f"{cls}_list", []))
 
             results = {
-                "video_id": video_id,
-                "video_path": video_path,
+                "video_id":       video_id,
+                "video_path":     video_path,
                 "detection_mode": self.detection_mode,
-                "processed_at": datetime.now().isoformat(),
+                "processed_at":   datetime.now().isoformat(),
                 "video_info": {
                     "total_frames": total_frames,
-                    "fps": round(fps, 2),
-                    "duration": round(video_duration, 2),
-                    "width": width,
-                    "height": height,
+                    "fps":          round(fps, 2),
+                    "duration":     round(video_duration, 2),
+                    "width":        width,
+                    "height":       height,
                 },
                 "summary": {
-                    "total_frames": frame_count,
+                    "total_frames":     frame_count,
                     "total_detections": total_detections_count,
-                    "detection_rate": detection_rate,
+                    "detection_rate":   detection_rate,
                     **class_counts,
                 },
                 "frames": frames,
@@ -336,36 +336,34 @@ class YoloeSegDetector(BaseDetector):
             self._save_to_db(video_id, all_detections_flat, perf_timings)
 
             # ── Perf report ──────────────────────────────────────────────────
-            total_time = process_end - process_start
+            total_time = time.time() - process_start
             frames_processed = (
                 frame_count // FRAME_SKIP if FRAME_SKIP > 1 else frame_count
             )
 
-            def _fmt(stage_key):
-                d = perf_timings[stage_key]
-                total = d["total"]
-                count = d["count"]
-                avg_ms = (total / count * 1000) if count > 0 else 0.0
-                return total, count, avg_ms
-
-            fd_t, fd_c, fd_avg = _fmt("frame_decode")
-            yi_t, yi_c, yi_avg = _fmt("yoloe_inference")
-            ri_t, ri_c, ri_avg = _fmt("rdd_inference")
-            gc_t, gc_c, gc_avg = _fmt("gps_coord")
-            dg_t, dg_c, dg_avg = _fmt("db_gps_match")
-            db_t, db_c, db_avg = _fmt("db_bulk_write")
+            def _fmt(key):
+                d = perf_timings[key]
+                t, c = d["total"], d["count"]
+                return t, c, (t / c * 1000) if c > 0 else 0.0
 
             def _flag(t):
                 return " ⚠️" if total_time > 0 and (t / total_time) > 0.20 else ""
 
+            fd_t,  fd_c,  fd_avg  = _fmt("frame_decode")
+            yi_t,  yi_c,  yi_avg  = _fmt("yoloe_inference")
+            ri_t,  ri_c,  ri_avg  = _fmt("rdd_inference")
+            gc_t,  gc_c,  gc_avg  = _fmt("gps_coord")
+            dg_t,  dg_c,  dg_avg  = _fmt("db_gps_match")
+            db_t,  db_c,  db_avg  = _fmt("db_bulk_write")
+
             report_lines = [
                 f"{'=' * 78}",
-                f"  PERF REPORT — [{video_id}]  mode=yoloe_seg (dual-model)",
+                f"  PERF REPORT — [{video_id}]  mode=yoloe_seg_pf (dual-model, prompt-free)",
                 f"{'=' * 78}",
                 f"  {'Stage':<30} {'Total (s)':>10} {'Count':>7} {'Avg/call (ms)':>15}",
                 f"  {'-'*30} {'-'*10} {'-'*7} {'-'*15}",
                 f"  {'Frame decode (I/O)':<30} {fd_t:>10.3f} {fd_c:>7d} {fd_avg:>15.2f}{_flag(fd_t)}",
-                f"  {'YOLOE seg inference':<30} {yi_t:>10.3f} {yi_c:>7d} {yi_avg:>15.2f}{_flag(yi_t)}",
+                f"  {'YOLOE-pf inference':<30} {yi_t:>10.3f} {yi_c:>7d} {yi_avg:>15.2f}{_flag(yi_t)}",
                 f"  {'RDD2022 crack inference':<30} {ri_t:>10.3f} {ri_c:>7d} {ri_avg:>15.2f}{_flag(ri_t)}",
                 f"  {'GPS coord lookup':<30} {gc_t:>10.3f} {gc_c:>7d} {gc_avg:>15.2f}{_flag(gc_t)}",
                 f"  {'DB GPS matching':<30} {dg_t:>10.3f} {dg_c:>7d} {dg_avg:>15.2f}{_flag(dg_t)}",
@@ -377,17 +375,16 @@ class YoloeSegDetector(BaseDetector):
                 f"  {'Detections saved':<30} {len(all_detections_flat):>10d}",
                 f"{'=' * 78}",
             ]
-            report_str = "\n".join(report_lines)
-            perf_logger.info(f"\n{report_str}")
-            logger.info(f"\n{report_str}")
+            perf_logger.info(f"\n" + "\n".join(report_lines))
+            logger.info(f"\n" + "\n".join(report_lines))
 
             processing_status[video_id] = {"status": "completed", "progress": 100}
             asyncio.run_coroutine_threadsafe(
                 manager.send_message(
                     video_id,
                     {
-                        "type": "complete",
-                        "status": "completed",
+                        "type":    "complete",
+                        "status":  "completed",
                         "summary": results["summary"],
                     },
                 ),
@@ -428,29 +425,27 @@ class YoloeSegDetector(BaseDetector):
                     line = line.strip()
                     if line:
                         frames.append(json.loads(line))
-        except Exception as e:
+        except Exception:
             pass
         return frames
 
     def _get_class_list(self, all_detections, class_name, gps_points, perf_timings=None):
-        """Build a list of detections for a specific class from the flat list."""
+        """Build a sorted list of detections for a specific class."""
         lst = []
         for det in all_detections:
             if det["type"] == class_name:
                 det_data = {
-                    "detection_id": det["detection_id"],
-                    "type": det["type"],
-                    "model_source": det.get("model_source", "unknown"),
+                    "detection_id":         det["detection_id"],
+                    "type":                 det["type"],
+                    "model_source":         det.get("model_source", "unknown"),
                     "first_detected_frame": det["first_detected_frame"],
-                    "first_detected_time": det["first_detected_time"],
-                    "confidence": det["confidence"],
-                    "bbox": det.get("bbox", {}),
+                    "first_detected_time":  det["first_detected_time"],
+                    "confidence":           det["confidence"],
+                    "bbox":                 det.get("bbox", {}),
                 }
                 if gps_points:
                     _t0 = time.perf_counter()
-                    gps_coords = self.find_nearest_gps(
-                        det["first_detected_time"], gps_points
-                    )
+                    gps_coords = self.find_nearest_gps(det["first_detected_time"], gps_points)
                     _gps_elapsed = time.perf_counter() - _t0
                     if perf_timings is not None:
                         perf_timings["gps_coord"]["total"] += _gps_elapsed
@@ -463,23 +458,24 @@ class YoloeSegDetector(BaseDetector):
         db = SessionLocal()
         try:
             video = db.query(Video).filter(Video.id == video_id).first()
-            video_chainage_id = video.chainage_id if video else None
-            video_package_id = None
-            video_project_id = None
-            video_direction = None
+            video_chainage_id  = video.chainage_id if video else None
+            video_package_id   = None
+            video_project_id   = None
+            video_direction    = None
 
             if video_chainage_id and video.chainage:
                 video_package_id = video.chainage.package_id
-                video_direction = video.chainage.direction
+                video_direction  = video.chainage.direction
                 if video.chainage.package:
                     video_project_id = video.chainage.package.project_id
 
             db_detections = []
             for det in all_detections:
                 lat, lng = det.get("lat"), det.get("lng")
-                project_id = video_project_id
-                package_id = video_package_id
+                project_id  = video_project_id
+                package_id  = video_package_id
                 chainage_id = video_chainage_id
+
                 if lat and lng:
                     _t0 = time.perf_counter()
                     chainage = find_chainage_by_gps(
@@ -493,7 +489,7 @@ class YoloeSegDetector(BaseDetector):
                         perf_timings["db_gps_match"]["count"] += 1
                     if chainage:
                         chainage_id = chainage.id
-                        package_id = chainage.package_id
+                        package_id  = chainage.package_id
                         if chainage.package:
                             project_id = chainage.package.project_id
 
@@ -520,9 +516,7 @@ class YoloeSegDetector(BaseDetector):
                 if perf_timings is not None:
                     perf_timings["db_bulk_write"]["total"] += _bulk_elapsed
                     perf_timings["db_bulk_write"]["count"] += 1
-                logger.info(
-                    f"Saved {len(db_detections)} detections to DB for {video_id}"
-                )
+                logger.info(f"Saved {len(db_detections)} detections to DB for {video_id}")
         except Exception as e:
             logger.error(f"Database save error: {e}")
         finally:
